@@ -1,0 +1,214 @@
+diff --git a/sale_advanced_workflow/__manifest__.py b/sale_advanced_workflow/__manifest__.py
+new file mode 100644
+index 0000000..8f7d4a3
+--- /dev/null
++++ b/sale_advanced_workflow/__manifest__.py
+@@ -0,0 +1,17 @@
++{
++    'name': 'Sale Advanced Workflow',
++    'version': '16.0.1.0.0',
++    'category': 'Sales',
++    'summary': 'Adds pending review state to sale orders with amount threshold check',
++    'author': 'Your Company',
++    'website': 'https://www.odoo.com',
++    'depends': ['sale', 'account'],
++    'data': [
++        'views/sale_order_views.xml',
++    ],
++    'demo': [],
++    'installable': True,
++    'application': False,
++    'auto_install': False,
++    'license': 'LGPL-3',
++}
+diff --git a/sale_advanced_workflow/models/__init__.py b/sale_advanced_workflow/models/__init__.py
+new file mode 100644
+index 0000000..e0f95c7
+--- /dev/null
++++ b/sale_advanced_workflow/models/__init__.py
+@@ -0,0 +1,3 @@
++# -*- coding: utf-8 -*-
++from . import sale_order
++
+diff --git a/sale_advanced_workflow/models/sale_order.py b/sale_advanced_workflow/models/sale_order.py
+new file mode 100644
+index 0000000..c074c46
+--- /dev/null
++++ b/sale_advanced_workflow/models/sale_order.py
+@@ -0,0 +1,34 @@
++# -*- coding: utf-8 -*-
++from odoo import models, fields, api, _
++from odoo.exceptions import UserError
++
++
++class SaleOrder(models.Model):
++    _inherit = 'sale.order'
++
++    state = fields.Selection(selection_add=[
++        ('pending_review', '待审核')
++    ], ondelete={'pending_review': 'set default'})
++
++    review_threshold = fields.Float(
++        string='审核阈值',
++        default=10000.0,
++        help='订单金额超过此阈值需要审核'
++    )
++
++    def action_pending_review(self):
++        for order in self:
++            if order.state != 'sale':
++                raise UserError(_('只有已确认的订单才能提交审核'))
++            
++            if order.amount_total <= order.review_threshold:
++                raise UserError(_('订单金额 %.2f 未超过审核阈值 %.2f，无需审核') % (order.amount_total, order.review_threshold))
++            
++            order.write({'state': 'pending_review'})
++            
++            if not order.invoice_ids:
++                order._create_invoices()
++                
++        return True
+diff --git a/sale_advanced_workflow/views/sale_order_views.xml b/sale_advanced_workflow/views/sale_order_views.xml
+new file mode 100644
+index 0000000..893c183
+--- /dev/null
++++ b/sale_advanced_workflow/views/sale_order_views.xml
+@@ -0,0 +1,16 @@
++<?xml version="1.0" encoding="utf-8"?>
++<odoo>
++    <data>
++        <record id="view_order_form_inherit" model="ir.ui.view">
++            <field name="name">sale.order.form.inherit</field>
++            <field name="model">sale.order</field>
++            <field name="inherit_id" ref="sale.view_order_form"/>
++            <field name="arch" type="xml">
++                <xpath expr="//header" position="inside">
++                    <button name="action_pending_review" string="待审核" type="object" class="oe_highlight"
++                            states="sale" attrs="{'invisible': ['|', ('amount_total', '&lt;=', review_threshold), ('state', '!=', 'sale')]}"/>
++                </xpath>
++            </field>
++        </record>
++    </data>
++</odoo>
+diff --git a/sale_advanced_workflow/i18n/zh_CN.po b/sale_advanced_workflow/i18n/zh_CN.po
+new file mode 100644
+index 0000000..a1b9c4d
+--- /dev/null
++++ b/sale_advanced_workflow/i18n/zh_CN.po
+@@ -0,0 +1,39 @@
++msgid ""
++msgstr ""
++"Content-Type: text/plain; charset=UTF-8\n"
++"Content-Transfer-Encoding: 8bit\n"
++"Project-Id-Version: Odoo Server 16.0\n"
++"Report-Msgid-Bugs-To: \n"
++"POT-Creation-Date: 2026-06-08 00:00+0000\n"
++"PO-Revision-Date: 2026-06-08 00:00+0000\n"
++"Last-Translator: \n"
++"Language-Team: \n"
++"Language: zh_CN\n"
++"MIME-Version: 1.0\n"
++
++#. module: sale_advanced_workflow
++#: model:ir.model.fields,field_description:sale_advanced_workflow.field_sale_order__review_threshold
++msgid "审核阈值"
++msgstr "审核阈值"
++
++#. module: sale_advanced_workflow
++#: model:ir.model.fields,help:sale_advanced_workflow.field_sale_order__review_threshold
++msgid "订单金额超过此阈值需要审核"
++msgstr "订单金额超过此阈值需要审核"
++
++#. module: sale_advanced_workflow
++#: model:ir.ui.view,arch_db:sale_advanced_workflow.view_order_form_inherit
++msgid "待审核"
++msgstr "待审核"
++
++#. module: sale_advanced_workflow
++#: code:addons/sale_advanced_workflow/models/sale_order.py:0
++#, python-format
++msgid "只有已确认的订单才能提交审核"
++msgstr "只有已确认的订单才能提交审核"
++
++#. module: sale_advanced_workflow
++#: code:addons/sale_advanced_workflow/models/sale_order.py:0
++#, python-format
++msgid "订单金额 %.2f 未超过审核阈值 %.2f，无需审核"
++msgstr "订单金额 %.2f 未超过审核阈值 %.2f，无需审核"
+diff --git a/sale_advanced_workflow/tests/__init__.py b/sale_advanced_workflow/tests/__init__.py
+new file mode 100644
+index 0000000..5a69c45
+--- /dev/null
++++ b/sale_advanced_workflow/tests/__init__.py
+@@ -0,0 +1,3 @@
++# -*- coding: utf-8 -*-
++from . import test_sale_advanced_workflow
++
+diff --git a/sale_advanced_workflow/tests/test_sale_advanced_workflow.py b/sale_advanced_workflow/tests/test_sale_advanced_workflow.py
+new file mode 100644
+index 0000000..b6f9d8c
+--- /dev/null
++++ b/sale_advanced_workflow/tests/test_sale_advanced_workflow.py
+@@ -0,0 +1,62 @@
++# -*- coding: utf-8 -*-
++from odoo.tests.common import TransactionCase
++from odoo.exceptions import UserError
++
++
++class TestSaleAdvancedWorkflow(TransactionCase):
++
++    def setUp(self):
++        super(TestSaleAdvancedWorkflow, self).setUp()
++        self.SaleOrder = self.env['sale.order']
++        self.partner = self.env['res.partner'].create({'name': 'Test Partner'})
++        self.product = self.env['product.product'].create({
++            'name': 'Test Product',
++            'type': 'consu',
++            'list_price': 1000.0,
++        })
++
++    def test_action_pending_review_success(self):
++        order = self.SaleOrder.create({
++            'partner_id': self.partner.id,
++            'order_line': [(0, 0, {
++                'product_id': self.product.id,
++                'product_uom_qty': 20,
++                'price_unit': 1000.0,
++            })]
++        })
++        order.action_confirm()
++        self.assertEqual(order.state, 'sale')
++        self.assertGreater(order.amount_total, order.review_threshold)
++        
++        order.action_pending_review()
++        self.assertEqual(order.state, 'pending_review')
++
++    def test_action_pending_review_not_confirmed(self):
++        order = self.SaleOrder.create({
++            'partner_id': self.partner.id,
++            'order_line': [(0, 0, {
++                'product_id': self.product.id,
++                'product_uom_qty': 1,
++                'price_unit': 1000.0,
++            })]
++        })
++        self.assertEqual(order.state, 'draft')
++        
++        with self.assertRaises(UserError):
++            order.action_pending_review()
++
++    def test_action_pending_review_below_threshold(self):
++        order = self.SaleOrder.create({
++            'partner_id': self.partner.id,
++            'order_line': [(0, 0, {
++                'product_id': self.product.id,
++                'product_uom_qty': 5,
++                'price_unit': 1000.0,
++            })]
++        })
++        order.action_confirm()
++        self.assertEqual(order.state, 'sale')
++        self.assertLess(order.amount_total, order.review_threshold)
++        
++        with self.assertRaises(UserError):
++            order.action_pending_review()
