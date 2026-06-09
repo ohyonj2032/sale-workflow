@@ -34,7 +34,10 @@ class AutomaticWorkflowJob(models.Model):
         _logger.debug("Pickings to validate: %s", pickings.ids)
         for picking in pickings:
             with savepoint(self.env.cr):
-                self._do_validate_picking(picking, picking_filter)
+                self._do_validate_picking(
+                    self._with_company_safe(picking, picking.company_id),
+                    picking_filter,
+                )
 
     # pylint: disable=W8110
     @api.model

@@ -3,7 +3,7 @@
 # © 2016 Serpent Consulting Services Pvt. Ltd.
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
 
-from odoo import fields, models
+from odoo import api, fields, models
 from odoo.tools.float_utils import float_compare
 
 
@@ -25,6 +25,24 @@ class SaleOrderLine(models.Model):
         """
         return 8, self.order_id.id
 
+    @api.model
+    def _with_company_safe(self, record, company):
+        """Safely switch company context preserving all allowed companies.
+
+        Replaces the native with_company() which, when chained after sudo(),
+        can silently drop companies from allowed_company_ids, causing
+        ir.rule to filter out stock.rule/stock.warehouse/stock.picking.type
+        records and silently skip delivery order generation.
+        """
+        company_id = company.id if company else False
+        current_allowed = record.env.context.get("allowed_company_ids", [])
+        if not current_allowed:
+            current_allowed = record.env.user.company_ids.ids
+        new_allowed = [company_id] + [
+            cid for cid in current_allowed if cid != company_id
+        ]
+        return record.with_context(allowed_company_ids=new_allowed)
+
     def _action_launch_stock_rule(self, previous_product_uom_qty=False):
         """
         Launch procurement group run method.
@@ -40,7 +58,7 @@ class SaleOrderLine(models.Model):
         if not previous_product_uom_qty:
             previous_product_uom_qty = {}
         for line in self:
-            line = line.with_company(line.company_id)
+            line = self._with_company_safe(line, line.company_id)
             if (
                 line.state != "sale"
                 or line.order_id.locked

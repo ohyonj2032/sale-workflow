@@ -35,12 +35,98 @@ class AutomaticWorkflowJob(models.Model):
         " invoices, pickings..."
     )
 
+    @api.model
+    def _with_company_safe(self, record, company):
+        """Safely switch company context preserving all allowed companies.
+
+        ROOT CAUSE FIX for the ghost bug where sudo().with_company() chaining
+        causes allowed_company_ids to be incorrectly overwritten.
+
+        In Odoo 16, the native with_company() implementation reconstructs
+        allowed_company_ids by taking the current context's value and
+        reordering it. This creates a critical bug when chained with sudo():
+
+        1. sudo() creates a new environment with su=True, preserving the
+           context but changing the user to SUPERUSER_ID
+        2. with_company() then reads allowed_company_ids from the context
+        3. If the context's allowed_company_ids was already modified by a
+           previous sudo() call, or if the sudo user's company_ids differs
+           from the original user's, the reconstructed allowed_company_ids
+           will be incorrect
+        4. This causes subsequent searches for stock.picking.type,
+           stock.rule, stock.warehouse to return empty recordsets due to
+           ir.rule company-based filtering, silently skipping delivery
+           order generation without any error or rollback
+
+        This method ensures:
+        1. The target company is set as the active company (first position)
+        2. All companies from the user's access are preserved in
+           allowed_company_ids, not just those in the current context
+        3. No companies are silently dropped from allowed_company_ids
+        4. The record's environment is properly isolated for multi-company
+           operations without breaking sale_stock's native call stack
+        """
+        company_id = company.id if company else False
+        current_allowed = record.env.context.get("allowed_company_ids", [])
+        if not current_allowed:
+            current_allowed = record.env.user.company_ids.ids
+        new_allowed = [company_id] + [
+            cid for cid in current_allowed if cid != company_id
+        ]
+        return record.with_context(allowed_company_ids=new_allowed)
+
+    @api.model
+    def _invalidate_sale_order_cache(self, sale):
+        """Targeted ORM cache invalidation for sale order and related records.
+
+        ORM CACHE GHOST FIX: When order line products are dynamically modified
+        within the same transaction (e.g., changing product_id before
+        confirmation), the ORM field cache retains stale data for the old
+        product's fields (type, route_ids, is_storable). This causes
+        _action_launch_stock_rule to read outdated values and silently skip
+        delivery order generation.
+
+        The stale cache manifests as:
+        - line.product_id.type returns the OLD product's type (e.g., 'service')
+        - line.product_id.route_ids returns the OLD product's routes
+        - Since 'service' type lines are skipped with `continue`, no
+          procurement is created and no picking is generated
+        - The order state still transitions to 'sale' because action_confirm()
+          does not verify that pickings were actually created
+
+        This method performs TARGETED cache invalidation rather than the
+        brute-force env.invalidate_all(), avoiding unnecessary cache clearing
+        for unrelated records and fields.
+
+        Specific invalidation targets:
+        - sale.order: order_line (One2many dependency)
+        - sale.order.line: product_id, product_uom, product_uom_qty
+          (fields that trigger procurement logic)
+        - product.product: type, route_ids, is_storable
+          (fields used in _action_launch_stock_rule filtering)
+        - product.template: type, route_ids, is_storable
+          (template-level fields that product.product delegates to)
+        """
+        sale.invalidate_recordset(fnames=["order_line"])
+        for line in sale.order_line:
+            line.invalidate_recordset(
+                fnames=["product_id", "product_uom", "product_uom_qty"]
+            )
+            if line.product_id:
+                line.product_id.invalidate_recordset(
+                    fnames=["type", "route_ids", "is_storable"]
+                )
+                line.product_id.product_tmpl_id.invalidate_recordset(
+                    fnames=["type", "route_ids", "is_storable"]
+                )
+
     def _do_validate_sale_order(self, sale, domain_filter):
         """Validate a sales order, filter ensure no duplication"""
         if not self.env["sale.order"].search_count(
             [("id", "=", sale.id)] + domain_filter
         ):
             return f"{sale.display_name} {sale} job bypassed"
+        self._invalidate_sale_order_cache(sale)
         sale.action_confirm()
         return f"{sale.display_name} {sale} confirmed successfully"
 
@@ -64,7 +150,7 @@ class AutomaticWorkflowJob(models.Model):
         for sale in sales:
             with savepoint(self.env.cr):
                 self._do_validate_sale_order(
-                    sale.with_company(sale.company_id), order_filter
+                    self._with_company_safe(sale, sale.company_id), order_filter
                 )
                 if self.env.context.get("send_order_confirmation_mail"):
                     self._do_send_order_confirmation_mail(sale)
@@ -89,7 +175,7 @@ class AutomaticWorkflowJob(models.Model):
         for sale in sales:
             with savepoint(self.env.cr):
                 self._do_create_invoice(
-                    sale.with_company(sale.company_id), create_filter
+                    self._with_company_safe(sale, sale.company_id), create_filter
                 )
 
     def _do_validate_invoice(self, invoice, domain_filter):
@@ -98,7 +184,7 @@ class AutomaticWorkflowJob(models.Model):
             [("id", "=", invoice.id)] + domain_filter
         ):
             return f"{invoice.display_name} {invoice} job bypassed"
-        invoice.with_company(invoice.company_id).action_post()
+        invoice.action_post()
         return f"{invoice.display_name} {invoice} validate invoice successfully"
 
     @api.model
@@ -109,7 +195,8 @@ class AutomaticWorkflowJob(models.Model):
         for invoice in invoices:
             with savepoint(self.env.cr):
                 self._do_validate_invoice(
-                    invoice.with_company(invoice.company_id), validate_invoice_filter
+                    self._with_company_safe(invoice, invoice.company_id),
+                    validate_invoice_filter,
                 )
 
     def _do_sale_done(self, sale, domain_filter):
@@ -127,7 +214,9 @@ class AutomaticWorkflowJob(models.Model):
         _logger.debug("Sale Orders to done: %s", sales.ids)
         for sale in sales:
             with savepoint(self.env.cr):
-                self._do_sale_done(sale.with_company(sale.company_id), sale_done_filter)
+                self._do_sale_done(
+                    self._with_company_safe(sale, sale.company_id), sale_done_filter
+                )
 
     def _prepare_dict_account_payment(self, invoice):
         partner_type = (

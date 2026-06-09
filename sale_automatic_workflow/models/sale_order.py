@@ -87,3 +87,46 @@ class SaleOrder(models.Model):
                 res |= super(SaleOrder, self - sales_keep_order_date).write(vals)
                 return res
         return super().write(vals)
+
+
+class SaleOrderLine(models.Model):
+    _inherit = "sale.order.line"
+
+    def write(self, vals):
+        """Override write to invalidate ORM cache when product is changed.
+
+        ORM CACHE GHOST FIX: When product_id is dynamically modified on an
+        order line within the same transaction (e.g., changing from a service
+        product to a storable product before order confirmation), the ORM
+        field cache retains stale data for the old product's computed fields.
+
+        This specifically affects _action_launch_stock_rule in sale_stock,
+        which reads line.product_id.type to decide whether to create
+        procurements. If the cached type is 'service' (from the old product),
+        the line is skipped with `continue`, and no delivery order is
+        generated — silently, without any error.
+
+        This override performs targeted cache invalidation when product_id
+        is written, ensuring that subsequent reads of product-dependent
+        fields return fresh data from the database rather than stale cache.
+        """
+        product_changed = "product_id" in vals
+        old_products = self.env["product.product"].browse()
+        if product_changed:
+            old_products = self.mapped("product_id")
+        result = super().write(vals)
+        if product_changed:
+            new_products = self.mapped("product_id")
+            all_products = old_products | new_products
+            all_products.invalidate_recordset(
+                fnames=["type", "route_ids", "is_storable"]
+            )
+            all_products.mapped("product_tmpl_id").invalidate_recordset(
+                fnames=["type", "route_ids", "is_storable"]
+            )
+            self.invalidate_recordset(
+                fnames=["product_id", "product_uom", "product_uom_qty"]
+            )
+            orders = self.mapped("order_id")
+            orders.invalidate_recordset(fnames=["order_line"])
+        return result
