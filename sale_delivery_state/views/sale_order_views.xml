@@ -7,20 +7,31 @@
         <field name="arch" type="xml">
             <field name="state" position="before">
                 <button
+                    name="action_release_credit"
+                    type="object"
+                    string="Release Credit Hold"
+                    class="oe_highlight"
+                    groups="sale_delivery_state.group_credit_manager"
+                    attrs="{'invisible': [('state', '!=', 'credit_hold')]}"
+                />
+                <button
                     name="action_force_delivery_state"
                     type="object"
                     string="Force delivery done"
-                    invisible="force_delivery_state or delivery_status == 'full' or state != 'sale' or not locked"
+                    invisible="force_delivery_state or delivery_status == 'full' or state not in ('sale', 'credit_hold') or not locked"
                 />
                 <button
                     name="action_unforce_delivery_state"
                     type="object"
                     string="Unforce delivery done"
-                    invisible="not force_delivery_state or state != 'sale' or not locked"
+                    invisible="not force_delivery_state or state not in ('sale', 'credit_hold') or not locked"
                 />
             </field>
             <group name="sale_shipping" position="inside">
-                <field name="delivery_status" invisible="state != 'sale'" />
+                <field name="delivery_status" invisible="state not in ('sale', 'credit_hold', 'done')" />
+                <field name="credit_hold" invisible="not credit_hold" />
+                <field name="credit_hold_reason" invisible="not credit_hold" />
+                <field name="credit_hold_date" invisible="not credit_hold" />
                 <field name="force_delivery_state" invisible="1" />
             </group>
             <xpath expr="//field[@name='order_line']/list" position="inside">
@@ -29,7 +40,7 @@
         </field>
     </record>
 
-    <record id="view_order_tree_inherit_delivery_status" model="ir.ui.view">
+    <record id="view_order_tree_inherit_delivery_state" model="ir.ui.view">
         <field name="name">sale.order.tree</field>
         <field name="inherit_id" ref="sale.view_order_tree" />
         <field name="model">sale.order</field>
@@ -42,6 +53,12 @@
                     decoration-info="delivery_status == 'pending'"
                     decoration-warning="delivery_status in ('partial', 'started')"
                     decoration-success="delivery_status == 'full'"
+                />
+                <field
+                    name="credit_hold"
+                    optional="hide"
+                    widget="badge"
+                    decoration-danger="credit_hold"
                 />
             </field>
         </field>
@@ -62,12 +79,22 @@
                     name="filter_delivery_status_pending"
                     domain="[('delivery_status','in',['pending', 'started', 'partial'])]"
                 />
+                <filter
+                    string="Credit Hold"
+                    name="filter_credit_hold"
+                    domain="[('credit_hold','=',True)]"
+                />
             </filter>
             <filter name="order_month" position="after">
                 <filter
                     string="Delivery Status"
                     name="delivery_status"
                     context="{'group_by': 'delivery_status'}"
+                />
+                <filter
+                    string="Credit Hold"
+                    name="group_credit_hold"
+                    context="{'group_by': 'credit_hold'}"
                 />
             </filter>
         </field>

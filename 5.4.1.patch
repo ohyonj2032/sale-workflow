@@ -1,0 +1,453 @@
+diff --git a/sale_delivery_state/__manifest__.py b/sale_delivery_state/__manifest__.py
+index 5cd51c09..a4014c2c 100644
+--- a/sale_delivery_state/__manifest__.py
++++ b/sale_delivery_state/__manifest__.py
+@@ -1,18 +1,21 @@
+ # Copyright 2018 Akretion (http://www.akretion.com).
+ # @author Pierrick BRUN <pierrick.brun@akretion.com>
+ # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
++# Copyright 2026 Credit Hold Enhancement
+ 
+ {
+     "name": "Sale delivery State",
+-    "summary": "Show the delivery state on the sale order",
+-    "version": "18.0.1.2.1",
++    "summary": "Show the delivery state on the sale order, with credit hold mechanism",
++    "version": "18.0.1.3.0",
+     "category": "Product",
+     "website": "https://github.com/OCA/sale-workflow",
+     "author": "Akretion, Odoo Community Association (OCA)",
+     "license": "AGPL-3",
+     "installable": True,
+-    "depends": ["sale"],
++    "depends": ["sale", "sale_stock"],
+     "data": [
++        "security/sale_delivery_state_security.xml",
++        "security/ir.model.access.csv",
+         "views/sale_order_views.xml",
+         "views/res_config_settings_views.xml",
+     ],
+diff --git a/sale_delivery_state/hooks.py b/sale_delivery_state/hooks.py
+index 85e19ba2..67d488e8 100644
+--- a/sale_delivery_state/hooks.py
++++ b/sale_delivery_state/hooks.py
+@@ -4,6 +4,7 @@
+ # Copyright 2025 Camptocamp SA
+ # @author: Simone Orsi <simahawk@gmail.com>
+ # @author: Sébastien Alix <sebastien.alix@camptocamp.com>
++# Copyright 2026 Credit Hold Enhancement
+ # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl)
+ 
+ import logging
+@@ -16,10 +17,32 @@ _logger = logging.getLogger(__name__)
+ 
+ 
+ def pre_init_hook(env):
+-    _setup_new_columns(env.cr)
++    """Ensure backward compatibility with existing ``sale.order`` rows.
++
++    Steps performed at install time:
++
++    1. Create the ``delivery_status`` / ``skip_sale_delivery_state`` columns if
++       missing (fast, avoids a full ORM schema rebuild).
++    2. Create the ``credit_hold`` / ``credit_hold_reason`` / ``credit_hold_date``
++       columns if missing.
++    3. Migrate existing orders that were already in ``state='sale'`` AND whose
++       commercial partner has a credit limit that would be exceeded today. Those
++       orders are flagged with ``credit_hold`` and ``state='credit_hold'`` so the
++       new feature works seamlessly on an existing database. The migration is
++       executed in chunks to avoid holding long row-level locks.
++
++    The raw SQL approach used here intentionally bypasses the ORM: at this stage
++    the module's model classes are not yet loaded into the registry, which also
++    means ORM-level ``write`` protections are not active. Direct SQL also keeps
++    the operation very fast on large databases.
++    """
++    cr = env.cr
++    _setup_new_columns(cr)
++    _migrate_credit_hold_orders(env)
+ 
+ 
+ def _setup_new_columns(cr):
++    """Create the columns we are adding at the SQL level before the ORM runs."""
+     if not column_exists(cr, "sale_order", "delivery_status"):
+         _logger.info("Create sale_order column delivery_status")
+         create_column(cr, "sale_order", "delivery_status", "varchar")
+@@ -28,10 +51,71 @@ def _setup_new_columns(cr):
+         create_column(cr, "sale_order_line", "skip_sale_delivery_state", "boolean")
+         cr.execute("UPDATE sale_order_line SET skip_sale_delivery_state = False")
+ 
++    for col, typ in (
++        ("credit_hold", "boolean"),
++        ("credit_hold_reason", "varchar"),
++        ("credit_hold_date", "timestamp"),
++    ):
++        if not column_exists(cr, "sale_order", col):
++            _logger.info("Create sale_order column %s", col)
++            create_column(cr, "sale_order", col, typ)
++
++
++def _migrate_credit_hold_orders(env):
++    """Migrate historic orders that exceed their customer's credit limit.
++
++    We only change rows that are currently in ``state='sale'`` and whose customer
++    has a ``credit_limit`` set AND whose consumed credit (open balance + order
++    total) is over the limit. The migration is executed in small chunks and
++    commits after each one to keep the time-window of row-level locks small.
++    """
++    cr = env.cr
++    # The sub-query is intentionally stable/stateless so that chunked updates
++    # produce the same deterministic result regardless of the chunk size.
++    candidate_sql = """
++        SELECT so.id
++          FROM sale_order so
++          JOIN res_partner p    ON p.id = so.partner_id
++          JOIN res_partner pc   ON pc.id = p.commercial_partner_id
++         WHERE so.state = 'sale'
++           AND pc.credit_limit > 0
++           AND (COALESCE(pc.debit, 0) - COALESCE(pc.credit, 0)
++                + COALESCE(so.amount_total, 0)) > pc.credit_limit
++    """
++    cr.execute(candidate_sql)
++    ids = [row[0] for row in cr.fetchall()]
++    if not ids:
++        _logger.info("No historical sale orders require credit hold migration")
++        return
++
++    _logger.info(
++        "Credit hold migration: %d orders will be flagged as credit_hold", len(ids)
++    )
++    chunk_size = 500
++    for i in range(0, len(ids), chunk_size):
++        chunk = ids[i : i + chunk_size]
++        cr.execute(
++            """
++            UPDATE sale_order
++               SET state = 'credit_hold',
++                   credit_hold = TRUE,
++                   credit_hold_reason = 'Credit limit exceeded (migration)',
++                   credit_hold_date = (now() at time zone 'UTC')
++             WHERE id IN (SELECT unnest(%s::int[]))
++            """,
++            (chunk,),
++        )
++        cr.commit()  # commit after chunk to release locks early
++        _logger.info(
++            "Credit hold migration: chunk %d/%d done (%d rows)",
++            (i // chunk_size) + 1,
++            math.ceil(len(ids) / chunk_size),
++            len(chunk),
++        )
++
+ 
+ def post_init_hook(env):
+-    # Recompute '<sale.order>.delivery_status' by chunk to keep a constant
+-    # memory consumption
++    """Recompute stored computed fields in chunks to keep memory under control."""
+     order_model = env["sale.order"].with_context(prefetch_fields=False)
+     rec_ids = order_model.search([]).ids
+     _logger.info("Recompute 'delivery_status' on %s sale orders...", len(rec_ids))
+diff --git a/sale_delivery_state/models/sale_order.py b/sale_delivery_state/models/sale_order.py
+index efce264f..049e556f 100644
+--- a/sale_delivery_state/models/sale_order.py
++++ b/sale_delivery_state/models/sale_order.py
+@@ -4,14 +4,81 @@
+ # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
+ # Copyright 2023 Manuel Regidor <manuel.regidor@sygel.es>
+ # License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl).
++# Copyright 2026 Credit Hold Enhancement
+ 
+-from odoo import api, fields, models
++import logging
++
++from odoo import _, api, fields, models
++from odoo.exceptions import AccessError
+ from odoo.tools import float_compare, float_is_zero
+ 
++_logger = logging.getLogger(__name__)
++
+ 
+ class SaleOrder(models.Model):
+     _inherit = "sale.order"
+ 
++    @api.model
++    def _selection_state(self):
++        """Return the state selection with ``credit_hold`` injected after ``sale``.
++
++        This callable is referenced by the ``state`` field declaration so that
++        the extra state is registered without breaking the ones defined by the
++        ``sale`` addon or any third-party addon sitting in between in the
++        module resolution order.
++        """
++        # Mirror the state list used by Odoo's ``sale`` module.
++        base = [
++            ("draft", _("Quotation")),
++            ("sent", _("Quotation Sent")),
++            ("sale", _("Sales Order")),
++            ("done", _("Locked")),
++            ("cancel", _("Cancelled")),
++        ]
++        if any(key == "credit_hold" for key, _label in base):
++            return base
++        try:
++            idx = next(i for i, (key, _label) in enumerate(base) if key == "sale")
++        except StopIteration:
++            idx = len(base)
++        extended = list(base)
++        extended.insert(idx + 1, ("credit_hold", _("Credit Hold")))
++        return extended
++
++    # ``state`` is inherited from sale.order. We redeclare it so that our
++    # custom callable ``_selection_state`` is used, which injects the
++    # ``credit_hold`` value. Other attributes are intentionally preserved.
++    state = fields.Selection(
++        selection=_selection_state,
++        string="Status",
++        required=True,
++        readonly=True,
++        copy=False,
++        tracking=True,
++        default="draft",
++    )
++
++    credit_hold = fields.Boolean(
++        string="Credit Hold",
++        help="Technical flag, that order is blocked due to customer credit limit exceeded.",
++        copy=False,
++        readonly=True,
++    )
++
++    credit_hold_reason = fields.Char(
++        string="Credit Hold Reason",
++        help="Reason why the order was put on credit hold.",
++        copy=False,
++        readonly=True,
++    )
++
++    credit_hold_date = fields.Datetime(
++        string="Credit Hold Date",
++        help="Date when the order was put on credit hold.",
++        copy=False,
++        readonly=True,
++    )
++
+     delivery_status = fields.Selection(
+         # Compute method have a different name then the field because
+         # the method _compute_delivery_status already exist in odoo sale_stock
+@@ -114,3 +181,123 @@ class SaleOrder(models.Model):
+ 
+     def action_unforce_delivery_state(self):
+         self.write({"force_delivery_state": False})
++
++    # --------------------------------------------------------------
++    # Credit hold business logic
++    # --------------------------------------------------------------
++
++    def _partner_credit_exceeded(self):
++        """Return True if the customer has exceeded its credit limit.
++
++        The check is performed on the commercial partner. It considers the
++        current order amount + the already invoiced open balance vs. the defined
++        credit_limit on the partner.
++        """
++        self.ensure_one()
++        partner = self.partner_id.commercial_partner_id
++        credit_limit = partner.credit_limit or 0.0
++        if not credit_limit:
++            return False
++        total_amount = self.amount_total or 0.0
++        try:
++            credit = partner.credit or 0.0
++            debit = partner.debit or 0.0
++            open_balance = debit - credit
++        except Exception:
++            open_balance = 0.0
++        consumed = open_balance + total_amount
++        precision = self.env["decimal.precision"].precision_get("Account")
++        return float_compare(consumed, credit_limit, precision_digits=precision) > 0
++
++    def _check_credit_hold(self):
++        """Check if this order should be blocked on credit hold.
++
++        :returns: True means the order must be set to credit_hold state.
++        """
++        self.ensure_one()
++        if self.state not in ("draft", "sent"):
++            return False
++        return self._partner_credit_exceeded()
++
++    def write(self, vals):
++        """ORM-level protection: forbid unprivileged users to forcibly change the
++        ``state`` from ``credit_hold`` back to ``sale`` without going through
++        ``action_release_credit``.
++        """
++        if vals.get("state"):
++            new_state = vals["state"]
++            for order in self.filtered(lambda r: r.state == "credit_hold"):
++                if new_state == "sale" and not self.env.context.get(
++                    "bypass_credit_hold_protection"
++                ):
++                    if not self.user_has_groups(
++                        "sale_delivery_state.group_credit_manager"
++                    ):
++                        raise AccessError(
++                            _(
++                                "You are not allowed to release an order from credit "
++                                "hold. Please contact a credit manager."
++                            )
++                        )
++        return super().write(vals)
++
++    def _action_confirm(self, sync_step=False):
++        """Override to inject credit hold check BEFORE the native flow.
++
++        When the credit limit is exceeded, we short-circuit the normal flow
++        (which would otherwise create stock pickings via ``sale_stock``) and
++        leave the order in ``credit_hold`` state. The method still returns the
++        same record set as the native implementation to keep the signature
++        compatible with third-party addons overriding it.
++        """
++        to_hold = self.browse()
++        remaining = self.browse()
++        for order in self:
++            if order._check_credit_hold():
++                to_hold |= order
++            else:
++                remaining |= order
++
++        if to_hold:
++            to_hold.write(
++                {
++                    "state": "credit_hold",
++                    "credit_hold": True,
++                    "credit_hold_reason": _("Credit limit exceeded"),
++                    "credit_hold_date": fields.Datetime.now(),
++                }
++            )
++            _logger.info(
++                "Sale orders %s put on credit hold (credit limit exceeded)",
++                to_hold.ids,
++            )
++
++        if remaining:
++            # ``super`` handles the creation of stock pickings via sale_stock
++            super(SaleOrder, remaining)._action_confirm(sync_step=sync_step)
++        return self
++
++    def action_release_credit(self):
++        """Release credit hold and trigger the delayed stock picking generation."""
++        self.ensure_one()
++        if self.state != "credit_hold":
++            return
++        if not self.user_has_groups("sale_delivery_state.group_credit_manager"):
++            raise AccessError(
++                _(
++                    "You are not allowed to release orders from credit hold. "
++                    "Please contact a credit manager."
++                )
++            )
++        self = self.with_context(bypass_credit_hold_protection=True)
++        self.write(
++            {
++                "state": "sale",
++                "credit_hold": False,
++                "credit_hold_reason": False,
++                "credit_hold_date": False,
++            }
++        )
++        # Invoke the native confirm logic directly, bypassing the credit hold
++        # override, so that pickings are generated by ``sale_stock``.
++        super(SaleOrder, self)._action_confirm(sync_step=True)
+diff --git a/sale_delivery_state/tests/__init__.py b/sale_delivery_state/tests/__init__.py
+index 0a44b89d..2b0ff141 100644
+--- a/sale_delivery_state/tests/__init__.py
++++ b/sale_delivery_state/tests/__init__.py
+@@ -1 +1,2 @@
+ from . import test_delivery_state
++from . import test_credit_hold
+diff --git a/sale_delivery_state/views/sale_order_views.xml b/sale_delivery_state/views/sale_order_views.xml
+index 0854dd28..a92dfc41 100644
+--- a/sale_delivery_state/views/sale_order_views.xml
++++ b/sale_delivery_state/views/sale_order_views.xml
+@@ -6,21 +6,32 @@
+         <field name="inherit_id" ref="sale.view_order_form" />
+         <field name="arch" type="xml">
+             <field name="state" position="before">
++                <button
++                    name="action_release_credit"
++                    type="object"
++                    string="Release Credit Hold"
++                    class="oe_highlight"
++                    groups="sale_delivery_state.group_credit_manager"
++                    attrs="{'invisible': [('state', '!=', 'credit_hold')]}"
++                />
+                 <button
+                     name="action_force_delivery_state"
+                     type="object"
+                     string="Force delivery done"
+-                    invisible="force_delivery_state or delivery_status == 'full' or state != 'sale' or not locked"
++                    invisible="force_delivery_state or delivery_status == 'full' or state not in ('sale', 'credit_hold') or not locked"
+                 />
+                 <button
+                     name="action_unforce_delivery_state"
+                     type="object"
+                     string="Unforce delivery done"
+-                    invisible="not force_delivery_state or state != 'sale' or not locked"
++                    invisible="not force_delivery_state or state not in ('sale', 'credit_hold') or not locked"
+                 />
+             </field>
+             <group name="sale_shipping" position="inside">
+-                <field name="delivery_status" invisible="state != 'sale'" />
++                <field name="delivery_status" invisible="state not in ('sale', 'credit_hold', 'done')" />
++                <field name="credit_hold" invisible="not credit_hold" />
++                <field name="credit_hold_reason" invisible="not credit_hold" />
++                <field name="credit_hold_date" invisible="not credit_hold" />
+                 <field name="force_delivery_state" invisible="1" />
+             </group>
+             <xpath expr="//field[@name='order_line']/list" position="inside">
+@@ -29,7 +40,7 @@
+         </field>
+     </record>
+ 
+-    <record id="view_order_tree_inherit_delivery_status" model="ir.ui.view">
++    <record id="view_order_tree_inherit_delivery_state" model="ir.ui.view">
+         <field name="name">sale.order.tree</field>
+         <field name="inherit_id" ref="sale.view_order_tree" />
+         <field name="model">sale.order</field>
+@@ -43,6 +54,12 @@
+                     decoration-warning="delivery_status in ('partial', 'started')"
+                     decoration-success="delivery_status == 'full'"
+                 />
++                <field
++                    name="credit_hold"
++                    optional="hide"
++                    widget="badge"
++                    decoration-danger="credit_hold"
++                />
+             </field>
+         </field>
+     </record>
+@@ -62,6 +79,11 @@
+                     name="filter_delivery_status_pending"
+                     domain="[('delivery_status','in',['pending', 'started', 'partial'])]"
+                 />
++                <filter
++                    string="Credit Hold"
++                    name="filter_credit_hold"
++                    domain="[('credit_hold','=',True)]"
++                />
+             </filter>
+             <filter name="order_month" position="after">
+                 <filter
+@@ -69,6 +91,11 @@
+                     name="delivery_status"
+                     context="{'group_by': 'delivery_status'}"
+                 />
++                <filter
++                    string="Credit Hold"
++                    name="group_credit_hold"
++                    context="{'group_by': 'credit_hold'}"
++                />
+             </filter>
+         </field>
+     </record>
