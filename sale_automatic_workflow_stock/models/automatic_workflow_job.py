@@ -14,7 +14,7 @@ _logger = logging.getLogger(__name__)
 
 
 class AutomaticWorkflowJob(models.Model):
-    """Extend to implement automatic work-flows for stock."""
+    """Extend to implement automatic workflows for stock."""
 
     _inherit = "automatic.workflow.job"
 
@@ -24,6 +24,15 @@ class AutomaticWorkflowJob(models.Model):
             [("id", "=", picking.id)] + domain_filter
         ):
             return f"{picking.display_name} {picking} job bypassed"
+        picking = self._switch_to_record_company(picking)
+        picking.invalidate_recordset()
+        if picking.move_ids:
+            picking.move_ids.invalidate_recordset()
+        _logger.debug(
+            "Validating picking %s with allowed_company_ids=%s",
+            picking.name,
+            picking.env.context.get("allowed_company_ids"),
+        )
         picking.validate_picking()
         return f"{picking.display_name} {picking} validate picking successfully"
 
@@ -36,7 +45,6 @@ class AutomaticWorkflowJob(models.Model):
             with savepoint(self.env.cr):
                 self._do_validate_picking(picking, picking_filter)
 
-    # pylint: disable=W8110
     @api.model
     def _handle_pickings(self, sale_workflow):
         """Override to add stock picking validation."""

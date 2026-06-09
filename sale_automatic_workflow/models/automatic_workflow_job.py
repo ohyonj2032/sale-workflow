@@ -35,12 +35,111 @@ class AutomaticWorkflowJob(models.Model):
         " invoices, pickings..."
     )
 
+    def _get_company_context_for_record(self, record):
+        """
+        Odoo 16 中，当 sudo() 与 with_company() 链式调用时，存在一个幽灵 Bug：
+        sudo() 创建的新环境会基于 SUPERUSER 的上下文重建，其中可能不包含
+        allowed_company_ids，或者包含一个由 ir.cron 调用方传入的不完整集合。
+        随后 with_company(company) 会将 allowed_company_ids 强行覆盖为
+        [company.id]，这会导致：
+
+        1. 环境中的 env.companies 被限制为单一公司
+        2. 后续 stock.picking.type / stock.rule / stock.warehouse 的搜索
+           因 _check_company_auto 自动过滤机制，只能看到该公司的记录
+        3. 若该公司的发货类型/路线未配置，search 返回空记录集
+        4. procurement._run() → _get_rule() 找不到规则，静默跳过发货单生成
+
+        本方法提供安全的公司上下文合并策略：
+        - 保留环境中已有的 allowed_company_ids
+        - 将 record.company_id 加入（若尚未在其中）
+        - 显式传递 allowed_company_ids 而非依赖 with_company() 的覆盖行为
+
+        Args:
+            record: 包含 company_id 的业务记录（sale.order / account.move）
+
+        Returns:
+            dict: 合并后的上下文字典，可直接传入 with_context()
+        """
+        company = record.company_id
+        company_id = company.id if company else self.env.company.id
+        current_allowed = self.env.context.get("allowed_company_ids")
+        if current_allowed is None:
+            user_companies = self.env.user.company_ids.ids
+            if user_companies:
+                new_allowed = list(user_companies)
+            elif self.env.company:
+                new_allowed = [self.env.company.id]
+            else:
+                new_allowed = []
+        else:
+            new_allowed = list(current_allowed)
+        if company_id not in new_allowed:
+            new_allowed.append(company_id)
+        return {"allowed_company_ids": new_allowed}
+
+    def _switch_to_record_company(self, record):
+        """
+        为指定记录构建带有正确多公司上下文的新记录集。
+
+        替代有问题的 record.with_company() 调用：
+        - 使用 _get_company_context_for_record() 获取合并后的上下文
+        - 显式传递 allowed_company_ids 避免被 with_company 覆盖
+        - 同时处理 sudo() 场景下的上下文传播
+
+        Args:
+            record: 要切换公司环境的记录
+
+        Returns:
+            带有正确多公司上下文的新记录集
+        """
+        company_ctx = self._get_company_context_for_record(record)
+        return record.with_context(**company_ctx)
+
+    def _invalidate_record_and_children_cache(self, record):
+        """
+        Odoo 16 的 ORM 缓存按 (model, field, record_id) 三级索引，共享于同一
+        psycopg2 游标内。当同事务中有其他代码路径（如前端 write）修改了关联
+        字段后，缓存虽被标记更新，但在以下场景下可能读取到陈旧数据：
+
+        1. 计算字段的级联依赖：product_id 变更 → route_ids 重新计算，
+           但 route_ids 的结果缓存条目可能未被触发逐出
+        2. 跨记录集引用：通过 sale.order 加载的 order_line 缓存条目，
+           与通过 sale.order.line 直接查询的条目是同一份缓存，
+           但 related 字段的中间层可能未刷新
+        3. flush() 时序问题：write 先写入 DB 再更新缓存，
+           若中间有其他线程/游标操作，可能导致缓存与 DB 不一致
+
+        本方法执行精确的缓存失效：
+        - 先 invalidate_recordset() 清除记录集所有字段缓存
+        - 针对可能产生 stale 关联计算的关键字段做二次保障
+
+        注意：此方法仅对当前 env（及其共享游标的 env）生效，
+        不会影响不同游标的独立事务。
+        """
+        record.invalidate_recordset()
+        if record._name == "sale.order":
+            order_lines = record.mapped("order_line")
+            if order_lines:
+                order_lines.invalidate_recordset()
+                for line in order_lines:
+                    if line.product_id:
+                        line.product_id.invalidate_recordset(
+                            fnames=["route_ids", "categ_id"]
+                        )
+
     def _do_validate_sale_order(self, sale, domain_filter):
         """Validate a sales order, filter ensure no duplication"""
         if not self.env["sale.order"].search_count(
             [("id", "=", sale.id)] + domain_filter
         ):
             return f"{sale.display_name} {sale} job bypassed"
+        sale = self._switch_to_record_company(sale)
+        self._invalidate_record_and_children_cache(sale)
+        _logger.debug(
+            "Confirming sale order %s with allowed_company_ids=%s",
+            sale.name,
+            sale.env.context.get("allowed_company_ids"),
+        )
         sale.action_confirm()
         return f"{sale.display_name} {sale} confirmed successfully"
 
@@ -63,9 +162,7 @@ class AutomaticWorkflowJob(models.Model):
         _logger.debug("Sale Orders to validate: %s", sales.ids)
         for sale in sales:
             with savepoint(self.env.cr):
-                self._do_validate_sale_order(
-                    sale.with_company(sale.company_id), order_filter
-                )
+                self._do_validate_sale_order(sale, order_filter)
                 if self.env.context.get("send_order_confirmation_mail"):
                     self._do_send_order_confirmation_mail(sale)
 
@@ -75,6 +172,8 @@ class AutomaticWorkflowJob(models.Model):
             [("id", "=", sale.id)] + domain_filter
         ):
             return f"{sale.display_name} {sale} job bypassed"
+        sale = self._switch_to_record_company(sale)
+        self._invalidate_record_and_children_cache(sale)
         payment = self.env["sale.advance.payment.inv"].create(
             {"sale_order_ids": sale.ids}
         )
@@ -88,9 +187,7 @@ class AutomaticWorkflowJob(models.Model):
         _logger.debug("Sale Orders to create Invoice: %s", sales.ids)
         for sale in sales:
             with savepoint(self.env.cr):
-                self._do_create_invoice(
-                    sale.with_company(sale.company_id), create_filter
-                )
+                self._do_create_invoice(sale, create_filter)
 
     def _do_validate_invoice(self, invoice, domain_filter):
         """Validate an invoice, filter ensure no duplication"""
@@ -98,7 +195,14 @@ class AutomaticWorkflowJob(models.Model):
             [("id", "=", invoice.id)] + domain_filter
         ):
             return f"{invoice.display_name} {invoice} job bypassed"
-        invoice.with_company(invoice.company_id).action_post()
+        invoice = self._switch_to_record_company(invoice)
+        invoice.invalidate_recordset()
+        _logger.debug(
+            "Posting invoice %s with allowed_company_ids=%s",
+            invoice.name,
+            invoice.env.context.get("allowed_company_ids"),
+        )
+        invoice.action_post()
         return f"{invoice.display_name} {invoice} validate invoice successfully"
 
     @api.model
@@ -108,9 +212,7 @@ class AutomaticWorkflowJob(models.Model):
         _logger.debug("Invoices to validate: %s", invoices.ids)
         for invoice in invoices:
             with savepoint(self.env.cr):
-                self._do_validate_invoice(
-                    invoice.with_company(invoice.company_id), validate_invoice_filter
-                )
+                self._do_validate_invoice(invoice, validate_invoice_filter)
 
     def _do_sale_done(self, sale, domain_filter):
         """Lock a sales order, filter ensure no duplication"""
@@ -118,6 +220,8 @@ class AutomaticWorkflowJob(models.Model):
             [("id", "=", sale.id)] + domain_filter
         ):
             return f"{sale.display_name} {sale} job bypassed"
+        sale = self._switch_to_record_company(sale)
+        self._invalidate_record_and_children_cache(sale)
         sale.action_lock()
         return f"{sale.display_name} {sale} locked successfully"
 
@@ -127,7 +231,7 @@ class AutomaticWorkflowJob(models.Model):
         _logger.debug("Sale Orders to done: %s", sales.ids)
         for sale in sales:
             with savepoint(self.env.cr):
-                self._do_sale_done(sale.with_company(sale.company_id), sale_done_filter)
+                self._do_sale_done(sale, sale_done_filter)
 
     def _prepare_dict_account_payment(self, invoice):
         partner_type = (

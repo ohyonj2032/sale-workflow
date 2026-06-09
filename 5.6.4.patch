@@ -1,0 +1,386 @@
+diff --git a/sale_automatic_workflow/models/automatic_workflow_job.py b/sale_automatic_workflow/models/automatic_workflow_job.py
+index 1352bf17..56f8db49 100644
+--- a/sale_automatic_workflow/models/automatic_workflow_job.py
++++ b/sale_automatic_workflow/models/automatic_workflow_job.py
+@@ -35,12 +35,111 @@ class AutomaticWorkflowJob(models.Model):
+         " invoices, pickings..."
+     )
+ 
++    def _get_company_context_for_record(self, record):
++        """
++        Odoo 16 中，当 sudo() 与 with_company() 链式调用时，存在一个幽灵 Bug：
++        sudo() 创建的新环境会基于 SUPERUSER 的上下文重建，其中可能不包含
++        allowed_company_ids，或者包含一个由 ir.cron 调用方传入的不完整集合。
++        随后 with_company(company) 会将 allowed_company_ids 强行覆盖为
++        [company.id]，这会导致：
++
++        1. 环境中的 env.companies 被限制为单一公司
++        2. 后续 stock.picking.type / stock.rule / stock.warehouse 的搜索
++           因 _check_company_auto 自动过滤机制，只能看到该公司的记录
++        3. 若该公司的发货类型/路线未配置，search 返回空记录集
++        4. procurement._run() → _get_rule() 找不到规则，静默跳过发货单生成
++
++        本方法提供安全的公司上下文合并策略：
++        - 保留环境中已有的 allowed_company_ids
++        - 将 record.company_id 加入（若尚未在其中）
++        - 显式传递 allowed_company_ids 而非依赖 with_company() 的覆盖行为
++
++        Args:
++            record: 包含 company_id 的业务记录（sale.order / account.move）
++
++        Returns:
++            dict: 合并后的上下文字典，可直接传入 with_context()
++        """
++        company = record.company_id
++        company_id = company.id if company else self.env.company.id
++        current_allowed = self.env.context.get("allowed_company_ids")
++        if current_allowed is None:
++            user_companies = self.env.user.company_ids.ids
++            if user_companies:
++                new_allowed = list(user_companies)
++            elif self.env.company:
++                new_allowed = [self.env.company.id]
++            else:
++                new_allowed = []
++        else:
++            new_allowed = list(current_allowed)
++        if company_id not in new_allowed:
++            new_allowed.append(company_id)
++        return {"allowed_company_ids": new_allowed}
++
++    def _switch_to_record_company(self, record):
++        """
++        为指定记录构建带有正确多公司上下文的新记录集。
++
++        替代有问题的 record.with_company() 调用：
++        - 使用 _get_company_context_for_record() 获取合并后的上下文
++        - 显式传递 allowed_company_ids 避免被 with_company 覆盖
++        - 同时处理 sudo() 场景下的上下文传播
++
++        Args:
++            record: 要切换公司环境的记录
++
++        Returns:
++            带有正确多公司上下文的新记录集
++        """
++        company_ctx = self._get_company_context_for_record(record)
++        return record.with_context(**company_ctx)
++
++    def _invalidate_record_and_children_cache(self, record):
++        """
++        Odoo 16 的 ORM 缓存按 (model, field, record_id) 三级索引，共享于同一
++        psycopg2 游标内。当同事务中有其他代码路径（如前端 write）修改了关联
++        字段后，缓存虽被标记更新，但在以下场景下可能读取到陈旧数据：
++
++        1. 计算字段的级联依赖：product_id 变更 → route_ids 重新计算，
++           但 route_ids 的结果缓存条目可能未被触发逐出
++        2. 跨记录集引用：通过 sale.order 加载的 order_line 缓存条目，
++           与通过 sale.order.line 直接查询的条目是同一份缓存，
++           但 related 字段的中间层可能未刷新
++        3. flush() 时序问题：write 先写入 DB 再更新缓存，
++           若中间有其他线程/游标操作，可能导致缓存与 DB 不一致
++
++        本方法执行精确的缓存失效：
++        - 先 invalidate_recordset() 清除记录集所有字段缓存
++        - 针对可能产生 stale 关联计算的关键字段做二次保障
++
++        注意：此方法仅对当前 env（及其共享游标的 env）生效，
++        不会影响不同游标的独立事务。
++        """
++        record.invalidate_recordset()
++        if record._name == "sale.order":
++            order_lines = record.mapped("order_line")
++            if order_lines:
++                order_lines.invalidate_recordset()
++                for line in order_lines:
++                    if line.product_id:
++                        line.product_id.invalidate_recordset(
++                            fnames=["route_ids", "categ_id"]
++                        )
++
+     def _do_validate_sale_order(self, sale, domain_filter):
+         """Validate a sales order, filter ensure no duplication"""
+         if not self.env["sale.order"].search_count(
+             [("id", "=", sale.id)] + domain_filter
+         ):
+             return f"{sale.display_name} {sale} job bypassed"
++        sale = self._switch_to_record_company(sale)
++        self._invalidate_record_and_children_cache(sale)
++        _logger.debug(
++            "Confirming sale order %s with allowed_company_ids=%s",
++            sale.name,
++            sale.env.context.get("allowed_company_ids"),
++        )
+         sale.action_confirm()
+         return f"{sale.display_name} {sale} confirmed successfully"
+ 
+@@ -63,9 +162,7 @@ class AutomaticWorkflowJob(models.Model):
+         _logger.debug("Sale Orders to validate: %s", sales.ids)
+         for sale in sales:
+             with savepoint(self.env.cr):
+-                self._do_validate_sale_order(
+-                    sale.with_company(sale.company_id), order_filter
+-                )
++                self._do_validate_sale_order(sale, order_filter)
+                 if self.env.context.get("send_order_confirmation_mail"):
+                     self._do_send_order_confirmation_mail(sale)
+ 
+@@ -75,6 +172,8 @@ class AutomaticWorkflowJob(models.Model):
+             [("id", "=", sale.id)] + domain_filter
+         ):
+             return f"{sale.display_name} {sale} job bypassed"
++        sale = self._switch_to_record_company(sale)
++        self._invalidate_record_and_children_cache(sale)
+         payment = self.env["sale.advance.payment.inv"].create(
+             {"sale_order_ids": sale.ids}
+         )
+@@ -88,9 +187,7 @@ class AutomaticWorkflowJob(models.Model):
+         _logger.debug("Sale Orders to create Invoice: %s", sales.ids)
+         for sale in sales:
+             with savepoint(self.env.cr):
+-                self._do_create_invoice(
+-                    sale.with_company(sale.company_id), create_filter
+-                )
++                self._do_create_invoice(sale, create_filter)
+ 
+     def _do_validate_invoice(self, invoice, domain_filter):
+         """Validate an invoice, filter ensure no duplication"""
+@@ -98,7 +195,14 @@ class AutomaticWorkflowJob(models.Model):
+             [("id", "=", invoice.id)] + domain_filter
+         ):
+             return f"{invoice.display_name} {invoice} job bypassed"
+-        invoice.with_company(invoice.company_id).action_post()
++        invoice = self._switch_to_record_company(invoice)
++        invoice.invalidate_recordset()
++        _logger.debug(
++            "Posting invoice %s with allowed_company_ids=%s",
++            invoice.name,
++            invoice.env.context.get("allowed_company_ids"),
++        )
++        invoice.action_post()
+         return f"{invoice.display_name} {invoice} validate invoice successfully"
+ 
+     @api.model
+@@ -108,9 +212,7 @@ class AutomaticWorkflowJob(models.Model):
+         _logger.debug("Invoices to validate: %s", invoices.ids)
+         for invoice in invoices:
+             with savepoint(self.env.cr):
+-                self._do_validate_invoice(
+-                    invoice.with_company(invoice.company_id), validate_invoice_filter
+-                )
++                self._do_validate_invoice(invoice, validate_invoice_filter)
+ 
+     def _do_sale_done(self, sale, domain_filter):
+         """Lock a sales order, filter ensure no duplication"""
+@@ -118,6 +220,8 @@ class AutomaticWorkflowJob(models.Model):
+             [("id", "=", sale.id)] + domain_filter
+         ):
+             return f"{sale.display_name} {sale} job bypassed"
++        sale = self._switch_to_record_company(sale)
++        self._invalidate_record_and_children_cache(sale)
+         sale.action_lock()
+         return f"{sale.display_name} {sale} locked successfully"
+ 
+@@ -127,7 +231,7 @@ class AutomaticWorkflowJob(models.Model):
+         _logger.debug("Sale Orders to done: %s", sales.ids)
+         for sale in sales:
+             with savepoint(self.env.cr):
+-                self._do_sale_done(sale.with_company(sale.company_id), sale_done_filter)
++                self._do_sale_done(sale, sale_done_filter)
+ 
+     def _prepare_dict_account_payment(self, invoice):
+         partner_type = (
+@@ -220,4 +324,4 @@ class AutomaticWorkflowJob(models.Model):
+         domain = self._workflow_process_to_run_domain()
+         for sale_workflow in sale_workflow_process.search(domain):
+             self.run_with_workflow(sale_workflow)
+-        return True
++        return True
+\ No newline at end of file
+diff --git a/sale_automatic_workflow_stock/models/automatic_workflow_job.py b/sale_automatic_workflow_stock/models/automatic_workflow_job.py
+index 0d9f9149..a45944ba 100644
+--- a/sale_automatic_workflow_stock/models/automatic_workflow_job.py
++++ b/sale_automatic_workflow_stock/models/automatic_workflow_job.py
+@@ -14,7 +14,7 @@ _logger = logging.getLogger(__name__)
+ 
+ 
+ class AutomaticWorkflowJob(models.Model):
+-    """Extend to implement automatic work-flows for stock."""
++    """Extend to implement automatic workflows for stock."""
+ 
+     _inherit = "automatic.workflow.job"
+ 
+@@ -24,6 +24,15 @@ class AutomaticWorkflowJob(models.Model):
+             [("id", "=", picking.id)] + domain_filter
+         ):
+             return f"{picking.display_name} {picking} job bypassed"
++        picking = self._switch_to_record_company(picking)
++        picking.invalidate_recordset()
++        if picking.move_ids:
++            picking.move_ids.invalidate_recordset()
++        _logger.debug(
++            "Validating picking %s with allowed_company_ids=%s",
++            picking.name,
++            picking.env.context.get("allowed_company_ids"),
++        )
+         picking.validate_picking()
+         return f"{picking.display_name} {picking} validate picking successfully"
+ 
+@@ -36,7 +45,6 @@ class AutomaticWorkflowJob(models.Model):
+             with savepoint(self.env.cr):
+                 self._do_validate_picking(picking, picking_filter)
+ 
+-    # pylint: disable=W8110
+     @api.model
+     def _handle_pickings(self, sale_workflow):
+         """Override to add stock picking validation."""
+@@ -45,4 +53,4 @@ class AutomaticWorkflowJob(models.Model):
+         if sale_workflow.validate_picking:
+             self._validate_pickings(
+                 safe_eval(sale_workflow.picking_filter_id.domain) + workflow_domain
+-            )
++            )
+\ No newline at end of file
+diff --git a/sale_procurement_group_by_line/model/sale.py b/sale_procurement_group_by_line/model/sale.py
+index d0d42b44..f64367c0 100644
+--- a/sale_procurement_group_by_line/model/sale.py
++++ b/sale_procurement_group_by_line/model/sale.py
+@@ -3,9 +3,13 @@
+ # © 2016 Serpent Consulting Services Pvt. Ltd.
+ # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
+ 
++import logging
++
+ from odoo import fields, models
+ from odoo.tools.float_utils import float_compare
+ 
++_logger = logging.getLogger(__name__)
++
+ 
+ class SaleOrderLine(models.Model):
+     _inherit = "sale.order.line"
+@@ -25,12 +29,65 @@ class SaleOrderLine(models.Model):
+         """
+         return 8, self.order_id.id
+ 
++    def _ensure_company_context(self, line):
++        """
++        替代 line.with_company(line.company_id) 的安全公司上下文切换。
++
++        with_company() 会将 allowed_company_ids 强行覆盖为 [company_id]，
++        在 sudo() 后调用的场景下，这会丢失环境中已有的多公司权限上下文，
++        导致后续 stock.picking.type / stock.rule 的 _check_company_auto
++        搜索过滤掉所有未归属于该单公司的记录，返回空结果，从而静默跳过
++        发货单的生成。
++
++        本方法使用合并策略：
++        - 保留环境中已有的 allowed_company_ids
++        - 确保 line.company_id 在其中
++        - 不依赖 with_company() 的覆盖行为
++        """
++        company = line.company_id
++        company_id = company.id if company else self.env.company.id
++        current_allowed = line.env.context.get("allowed_company_ids")
++        if current_allowed is None:
++            user_companies = self.env.user.company_ids.ids
++            if user_companies:
++                new_allowed = list(user_companies)
++            elif self.env.company:
++                new_allowed = [self.env.company.id]
++            else:
++                new_allowed = []
++        else:
++            new_allowed = list(current_allowed)
++        if company_id not in new_allowed:
++            new_allowed.append(company_id)
++        return line.with_context(allowed_company_ids=new_allowed)
++
+     def _action_launch_stock_rule(self, previous_product_uom_qty=False):
+         """
+         Launch procurement group run method.
++
++        Fix: 在同事务中动态修改订单行产品后，ORM 的字段级缓存
++        （按 (model, field, record_id) 三层索引）可能持有陈旧的
++        product_id、route_ids 等字段值，导致基于产品路线判断的
++        采购逻辑读取到过期数据。
++
++        修复策略：
++        1. 在遍历之前，对整个记录集执行 invalidate_recordset()，
++           强制下次字段访问时重新从数据库加载
++        2. 额外对关联的 product.product 记录集的关键字段
++           (route_ids, categ_id) 执行精确缓存失效
++        3. 使用 _ensure_company_context 替代 with_company()，
++           避免 allowed_company_ids 被覆盖
+         """
+         if self._context.get("skip_procurement"):
+             return True
++
++        self.invalidate_recordset()
++        for line in self:
++            if line.product_id:
++                line.product_id.invalidate_recordset(
++                    fnames=["route_ids", "categ_id"]
++                )
++
+         precision = self.env["decimal.precision"].precision_get(
+             "Product Unit of Measure"
+         )
+@@ -40,7 +97,7 @@ class SaleOrderLine(models.Model):
+         if not previous_product_uom_qty:
+             previous_product_uom_qty = {}
+         for line in self:
+-            line = line.with_company(line.company_id)
++            line = self._ensure_company_context(line)
+             if (
+                 line.state != "sale"
+                 or line.order_id.locked
+@@ -56,8 +113,6 @@ class SaleOrderLine(models.Model):
+ 
+             group_id = line._get_procurement_group()
+ 
+-            # Group the sales order lines with same procurement group
+-            # according to the group key
+             for order_line in line.order_id.order_line:
+                 g_id = order_line.procurement_group_id or False
+                 if g_id:
+@@ -70,9 +125,6 @@ class SaleOrderLine(models.Model):
+                 group_id = self.env["procurement.group"].create(vals)
+                 line.order_id.procurement_group_id = group_id
+             else:
+-                # In case the procurement group is already created and the
+-                # order was cancelled, we need to update certain values
+-                # of the group.
+                 updated_vals = {}
+                 if group_id.partner_id != line.order_id.partner_shipping_id:
+                     updated_vals.update(
+@@ -101,22 +153,23 @@ class SaleOrderLine(models.Model):
+                 product_qty, procurement_uom, origin, values
+             )
+             procured_line_ids.add(line.id)
+-            # We store the procured quantity in the UoM of the line to avoid
+-            # duplicated procurements, specially for dropshipping and kits.
+             previous_product_uom_qty[line.id] = line.product_uom_qty
+         if procurements:
++            _logger.debug(
++                "Running procurements for %d lines with "
++                "allowed_company_ids=%s",
++                len(procurements),
++                self.env.context.get("allowed_company_ids"),
++            )
+             self.env["procurement.group"].run(procurements)
+-        # This next block is currently needed only because the scheduler trigger is done
+-        # by picking confirmation rather than stock.move confirmation
+         orders = self.mapped("order_id")
+         for order in orders:
+             pickings_to_confirm = order.picking_ids.filtered(
+                 lambda p: p.state not in ["cancel", "done"]
+             )
+             if pickings_to_confirm:
+-                # Trigger the Scheduler for Pickings
+                 pickings_to_confirm.action_confirm()
+         remaining_lines = self - self.browse(procured_line_ids)
+         return super(
+             SaleOrderLine, remaining_lines.with_context(sale_group_by_line=True)
+-        )._action_launch_stock_rule(previous_product_uom_qty=previous_product_uom_qty)
++        )._action_launch_stock_rule(previous_product_uom_qty=previous_product_uom_qty)
+\ No newline at end of file
