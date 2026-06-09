@@ -63,11 +63,22 @@ class AutomaticWorkflowJob(models.Model):
         _logger.debug("Sale Orders to validate: %s", sales.ids)
         for sale in sales:
             with savepoint(self.env.cr):
+                # Fix: ORM Cache Ghost - Precisely invalidate cache for modified fields and flush
+                sale.order_line.invalidate_recordset(['product_id', 'product_uom_qty', 'route_id'])
+                sale.env.flush_all()
+
+                # Fix: Environment Isolation - Safely construct multi-company context
+                # without using force_company and avoiding sudo().with_company() pollution
+                clean_context = dict(self.env.context)
+                clean_context['allowed_company_ids'] = sale.company_id.ids
+                clean_env = self.env(context=clean_context)
+                sale_clean = sale.with_env(clean_env).with_company(sale.company_id)
+
                 self._do_validate_sale_order(
-                    sale.with_company(sale.company_id), order_filter
+                    sale_clean, order_filter
                 )
                 if self.env.context.get("send_order_confirmation_mail"):
-                    self._do_send_order_confirmation_mail(sale)
+                    self._do_send_order_confirmation_mail(sale_clean)
 
     def _do_create_invoice(self, sale, domain_filter):
         """Create an invoice for a sales order, filter ensure no duplication"""
@@ -88,8 +99,12 @@ class AutomaticWorkflowJob(models.Model):
         _logger.debug("Sale Orders to create Invoice: %s", sales.ids)
         for sale in sales:
             with savepoint(self.env.cr):
+                clean_context = dict(self.env.context)
+                clean_context['allowed_company_ids'] = sale.company_id.ids
+                clean_env = self.env(context=clean_context)
+                sale_clean = sale.with_env(clean_env).with_company(sale.company_id)
                 self._do_create_invoice(
-                    sale.with_company(sale.company_id), create_filter
+                    sale_clean, create_filter
                 )
 
     def _do_validate_invoice(self, invoice, domain_filter):
@@ -108,8 +123,12 @@ class AutomaticWorkflowJob(models.Model):
         _logger.debug("Invoices to validate: %s", invoices.ids)
         for invoice in invoices:
             with savepoint(self.env.cr):
+                clean_context = dict(self.env.context)
+                clean_context['allowed_company_ids'] = invoice.company_id.ids
+                clean_env = self.env(context=clean_context)
+                invoice_clean = invoice.with_env(clean_env).with_company(invoice.company_id)
                 self._do_validate_invoice(
-                    invoice.with_company(invoice.company_id), validate_invoice_filter
+                    invoice_clean, validate_invoice_filter
                 )
 
     def _do_sale_done(self, sale, domain_filter):
@@ -127,7 +146,11 @@ class AutomaticWorkflowJob(models.Model):
         _logger.debug("Sale Orders to done: %s", sales.ids)
         for sale in sales:
             with savepoint(self.env.cr):
-                self._do_sale_done(sale.with_company(sale.company_id), sale_done_filter)
+                clean_context = dict(self.env.context)
+                clean_context['allowed_company_ids'] = sale.company_id.ids
+                clean_env = self.env(context=clean_context)
+                sale_clean = sale.with_env(clean_env).with_company(sale.company_id)
+                self._do_sale_done(sale_clean, sale_done_filter)
 
     def _prepare_dict_account_payment(self, invoice):
         partner_type = (
@@ -151,7 +174,11 @@ class AutomaticWorkflowJob(models.Model):
         _logger.debug("Invoices to Register Payment: %s", invoices.ids)
         for invoice in invoices:
             with savepoint(self.env.cr):
-                self._register_payment_invoice(invoice)
+                clean_context = dict(self.env.context)
+                clean_context['allowed_company_ids'] = invoice.company_id.ids
+                clean_env = self.env(context=clean_context)
+                invoice_clean = invoice.with_env(clean_env).with_company(invoice.company_id)
+                self._register_payment_invoice(invoice_clean)
         return
 
     def _register_payment_invoice(self, invoice):
