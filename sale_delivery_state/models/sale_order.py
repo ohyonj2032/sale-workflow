@@ -12,6 +12,47 @@ from odoo.tools import float_compare, float_is_zero
 class SaleOrder(models.Model):
     _inherit = "sale.order"
 
+    state = fields.Selection(
+        selection_add=[("credit_hold", "Credit Hold")],
+        ondelete={"credit_hold": "set default"},
+    )
+
+    def _action_confirm(self):
+        if self.env.context.get('ignore_credit_limit'):
+            return super()._action_confirm()
+
+        orders_to_hold = self.env["sale.order"]
+        for order in self:
+            if order.partner_id.use_partner_credit_limit and (
+                order.partner_id.credit + order.amount_total > order.partner_id.credit_limit
+            ):
+                orders_to_hold |= order
+
+        normal_orders = self - orders_to_hold
+        res = None
+        if normal_orders:
+            res = super(SaleOrder, normal_orders)._action_confirm()
+
+        if orders_to_hold:
+            orders_to_hold.write({"state": "credit_hold"})
+
+        return res if res is not None else True
+
+    def action_release_credit(self):
+        self.ensure_one()
+        if not self.env.user.has_group("sale_delivery_state.group_credit_manager"):
+            from odoo.exceptions import AccessError
+            raise AccessError("Only Credit Managers can release credit hold.")
+        return self.with_context(ignore_credit_limit=True).action_confirm()
+
+    def write(self, vals):
+        if vals.get("state") == "sale" and not self.env.context.get("ignore_credit_limit"):
+            for order in self:
+                if order.state == "credit_hold":
+                    from odoo.exceptions import UserError
+                    raise UserError("You cannot force a frozen order to sale state.")
+        return super().write(vals)
+
     delivery_status = fields.Selection(
         # Compute method have a different name then the field because
         # the method _compute_delivery_status already exist in odoo sale_stock

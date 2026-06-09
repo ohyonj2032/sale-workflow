@@ -1,0 +1,25 @@
+# Translation of Odoo Server.
+# This file contains the translation of the following modules:
+# * sale_delivery_state
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: Odoo Server 16.0\n"
+"Report-Msgid-Bugs-To: \n"
+"Last-Translator: \n"
+"Language-Team: \n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: \n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#. module: sale_delivery_state
+#: model:ir.model.fields.selection,name:sale_delivery_state.selection__sale_order__state__credit_hold
+msgid "Credit Hold"
+msgstr "信用冻结"
+
+#. module: sale_delivery_state
+#: model_terms:ir.ui.view,arch_db:sale_delivery_state.view_order_form_inherit_delivery_state
+msgid "Release Hold"
+msgstr "解除冻结"

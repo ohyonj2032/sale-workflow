@@ -7,6 +7,14 @@
         <field name="arch" type="xml">
             <field name="state" position="before">
                 <button
+                    name="action_release_credit"
+                    type="object"
+                    string="Release Hold"
+                    class="btn-primary"
+                    groups="sale_delivery_state.group_credit_manager"
+                    invisible="state != 'credit_hold'"
+                />
+                <button
                     name="action_force_delivery_state"
                     type="object"
                     string="Force delivery done"

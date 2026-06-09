@@ -13,6 +13,7 @@
     "installable": True,
     "depends": ["sale"],
     "data": [
+        "security/sale_delivery_state_security.xml",
         "views/sale_order_views.xml",
         "views/res_config_settings_views.xml",
     ],

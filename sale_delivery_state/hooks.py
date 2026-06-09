@@ -17,7 +17,32 @@ _logger = logging.getLogger(__name__)
 
 def pre_init_hook(env):
     _setup_new_columns(env.cr)
+    _migrate_credit_hold_orders(env)
 
+def _migrate_credit_hold_orders(env):
+    cr = env.cr
+    _logger.info("Migrating historic orders to credit_hold state if credit limit exceeded")
+    
+    # Check if `use_partner_credit_limit` exists (in Odoo 16 it's on res.partner)
+    if not column_exists(cr, "res_partner", "use_partner_credit_limit"):
+        return
+        
+    cr.execute("SELECT id FROM sale_order WHERE state = 'sale'")
+    order_ids = [row[0] for row in cr.fetchall()]
+    
+    batch_size = 500
+    for i in range(0, len(order_ids), batch_size):
+        batch = order_ids[i:i+batch_size]
+        orders = env['sale.order'].browse(batch)
+        for order in orders:
+            if order.partner_id.use_partner_credit_limit and (
+                order.partner_id.credit + order.amount_total > order.partner_id.credit_limit
+            ):
+                # Cancel associated pickings
+                if 'picking_ids' in order._fields:
+                    order.picking_ids.action_cancel()
+                order.write({'state': 'credit_hold'})
+        cr.commit()
 
 def _setup_new_columns(cr):
     if not column_exists(cr, "sale_order", "delivery_status"):

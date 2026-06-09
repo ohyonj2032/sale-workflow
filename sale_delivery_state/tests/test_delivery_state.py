@@ -72,6 +72,16 @@ class TestDeliveryState(TransactionCase):
             line.qty_delivered = line.product_uom_qty
         self.assertEqual(self.order.delivery_status, "full")
 
+    def test_delivery_done_delivery_cost(self):
+        self._add_delivery_cost_line()
+        with self._mock_delivery():
+            self.order.action_confirm()
+            for line in self.order.order_line:
+                if line._is_delivery():
+                    continue
+                line.qty_delivered = line.product_uom_qty
+            self.assertEqual(self.order.delivery_status, "full")
+
     def test_no_delivery_delivery_cost(self):
         self._add_delivery_cost_line()
         with self._mock_delivery():
@@ -98,16 +108,6 @@ class TestDeliveryState(TransactionCase):
             self.order.force_delivery_state = True
             self.assertEqual(self.order.delivery_status, "full")
 
-    def test_delivery_done_delivery_cost(self):
-        self._add_delivery_cost_line()
-        with self._mock_delivery():
-            self.order.action_confirm()
-            for line in self.order.order_line:
-                if line._is_delivery():
-                    continue
-                line.qty_delivered = line.product_uom_qty
-            self.assertEqual(self.order.delivery_status, "full")
-
     def test_skip_service_line(self):
         self._add_service_line()
         self.order.action_confirm()
@@ -120,3 +120,60 @@ class TestDeliveryState(TransactionCase):
             lambda a: a.product_id and a.product_id == self.service_product
         ).write({"skip_sale_delivery_state": True})
         self.assertEqual(self.order.delivery_status, "full")
+
+class TestCreditHold(TransactionCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.env = cls.env(context=dict(cls.env.context, tracking_disable=True))
+        cls.partner = cls.env["res.partner"].create({
+            "name": "Test Credit Partner",
+            "use_partner_credit_limit": True,
+            "credit_limit": 100.0,
+        })
+        cls.product = cls.env["product.product"].create({
+            "name": "Expensive Product",
+            "type": "consu",
+            "list_price": 150.0,
+        })
+        cls.order = cls.env["sale.order"].create({
+            "partner_id": cls.partner.id,
+            "order_line": [(0, 0, {
+                "product_id": cls.product.id,
+                "product_uom_qty": 1,
+                "price_unit": 150.0,
+            })]
+        })
+
+    def test_credit_hold_flow(self):
+        # 1. New order freeze
+        self.order.action_confirm()
+        self.assertEqual(self.order.state, "credit_hold")
+        
+        # 2. Test context isolation (normal user RPC bypass)
+        with self.assertRaises(Exception):
+            self.order.write({"state": "sale"})
+            
+        # 3. Release hold
+        self.env.user.groups_id |= self.env.ref("sale_delivery_state.group_credit_manager")
+        self.order.action_release_credit()
+        self.assertEqual(self.order.state, "sale")
+
+    def test_pre_init_hook_migration(self):
+        # 1. Simulate pre-installation DB state
+        # Force order into 'sale' state without triggering confirmation
+        self.order.write({"state": "sale"})
+        
+        # 2. Run hook
+        from ..hooks import _migrate_credit_hold_orders
+        with mock.patch.object(self.env.cr, 'commit'):
+            _migrate_credit_hold_orders(self.env)
+        
+        # 3. Verify migration
+        self.order.invalidate_recordset()
+        self.assertEqual(self.order.state, "credit_hold")
+        
+        # 4. Release and check pickings
+        self.env.user.groups_id |= self.env.ref("sale_delivery_state.group_credit_manager")
+        self.order.action_release_credit()
+        self.assertEqual(self.order.state, "sale")
