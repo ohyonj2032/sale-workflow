@@ -1,0 +1,488 @@
+diff --git a/sale_substate/__manifest__.py b/sale_substate/__manifest__.py
+index 546abfd2..85aabc7c 100644
+--- a/sale_substate/__manifest__.py
++++ b/sale_substate/__manifest__.py
+@@ -2,20 +2,22 @@
+ # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
+ 
+ {
+-    "name": "Sale Sub State",
+-    "version": "18.0.1.0.0",
+-    "category": "Tools",
+-    "author": "Akretion, " "Odoo Community Association (OCA)",
++    "name": "Sale Workflow",
++    "summary": "Centralized sale order state machine with partial delivery support",
++    "version": "16.0.1.0.0",
++    "category": "Sales/Sales",
++    "author": "Akretion, Odoo Community Association (OCA)",
+     "website": "https://github.com/OCA/sale-workflow",
+     "license": "AGPL-3",
+-    "depends": ["base_substate", "sale_management"],
++    "depends": ["sale_management"],
+     "data": [
+-        "views/sale_views.xml",
+-        "data/sale_substate_mail_template_data.xml",
+         "data/sale_substate_data.xml",
++        "data/sale_substate_mail_template_data.xml",
++        "views/sale_order_views.xml",
+     ],
+     "demo": [
+         "data/sale_substate_demo.xml",
+     ],
+     "installable": True,
++    "application": False,
+ }
+diff --git a/sale_substate/i18n/es.po b/sale_substate/i18n/es.po
+index 5225ac67..4f61e2d8 100644
+--- a/sale_substate/i18n/es.po
++++ b/sale_substate/i18n/es.po
+@@ -110,101 +110,91 @@ msgstr ""
+ "            "
+ 
+ #. module: sale_substate
+-#: model:ir.model.fields,field_description:sale_substate.field_base_substate_type__model
+-msgid "Apply on"
+-msgstr "Aplicar sobre"
+-
+-#. module: sale_substate
+-#: model:ir.model,name:sale_substate.model_base_substate_type
+-msgid "Base Substate Type"
+-msgstr "Tipo de subestado base"
+-
+-#. module: sale_substate
+-#: model:base.substate,name:sale_substate.base_substate_delivered
++#: model:ir.model.fields.selection,name:sale_substate.selection__sale_order__delivery_state__delivered
++#: model_terms:ir.ui.view,arch_db:sale_substate.sale_order_view_form
+ msgid "Delivered"
+ msgstr "Entregado"
+ 
+ #. module: sale_substate
+-#: model:base.substate,name:sale_substate.base_substate_in_delivery
+-msgid "In delivering"
+-msgstr "En entrega"
++#: model:ir.model.fields,field_description:sale_substate.field_sale_order__delivery_state
++msgid "Delivery State"
++msgstr "Estado de Entrega"
+ 
+ #. module: sale_substate
+-#: model:mail.template,name:sale_substate.mail_template_data_sale_substate_delivery
+-msgid "In delivery"
+-msgstr "En entrega"
++#: model:ir.model.fields.selection,name:sale_substate.selection__sale_order__delivery_state__no
++msgid "Nothing to Deliver"
++msgstr "Nada para Entregar"
+ 
+ #. module: sale_substate
+-#: model:base.substate,name:sale_substate.base_substate_under_nego
+-msgid "In negotiation"
+-msgstr "En negociación"
++#: model:ir.model.fields.selection,name:sale_substate.selection__sale_order__delivery_state__pending
++msgid "Pending Delivery"
++msgstr "Pendiente de Entrega"
+ 
+ #. module: sale_substate
+-#: model:base.substate,name:sale_substate.base_substate_lost
+-msgid "Lost"
+-msgstr "Perdido"
++#: model:ir.model.fields.selection,name:sale_substate.selection__sale_order__delivery_state__partial
++msgid "Partially Delivered"
++msgstr "Parcialmente Entregado"
+ 
+ #. module: sale_substate
+-#: model:target.state.value,name:sale_substate.target_state_value_draft
+-msgid "Quotation"
+-msgstr "Cotización"
++#: model_terms:ir.ui.view,arch_db:sale_substate.sale_order_view_form
++msgid "Partial Deliver"
++msgstr "Entrega Parcial"
+ 
+ #. module: sale_substate
+-#: model:mail.template,subject:sale_substate.mail_template_data_sale_substate_delivery
+-#: model:mail.template,subject:sale_substate.mail_template_data_sale_substate_wait_docs
+-msgid "Reception of {{object.name}}"
+-msgstr "Recepción de {{object.name}}"
++#: model:ir.model.fields,help:sale_substate.field_sale_order__delivery_state
++msgid "Indicates whether the sale order delivery progress based on picking state."
++msgstr "Indica el progreso de entrega del pedido de venta basado en el estado de las picking."
+ 
+ #. module: sale_substate
+-#: model:target.state.value,name:sale_substate.target_state_value_sale
+-msgid "Sale"
+-msgstr "Venta"
+-
+-#. module: sale_substate
+-#: model:ir.model.fields.selection,name:sale_substate.selection__base_substate_type__model__sale_order
+-msgid "Sale order"
+-msgstr "Pedido de venta"
++#: model:ir.model,name:sale_substate.model_sale_order
++msgid "Sales Order"
++msgstr "Órdenes de Venta"
+ 
+ #. module: sale_substate
+-#: model:base.substate.type,name:sale_substate.base_substate_type_sale
+-msgid "Sale order Substate"
+-msgstr "Subestado de orden de venta"
++#: model:mail.template,name:sale_substate.mail_template_data_sale_substate_delivery
++msgid "In delivery"
++msgstr "En entrega"
+ 
+ #. module: sale_substate
+-#: model:ir.model,name:sale_substate.model_sale_order
+-msgid "Sales Order"
+-msgstr "Órdenes de Venta"
++#: model:mail.template,name:sale_substate.mail_template_data_sale_substate_wait_docs
++msgid "Waiting for legal documents"
++msgstr "A la espera de documentos legales"
+ 
+ #. module: sale_substate
+-#: model:ir.model.fields,field_description:sale_substate.field_sale_order__substate_id
+-msgid "Sub State"
+-msgstr "Sub estado"
++#: model:mail.template,subject:sale_substate.mail_template_data_sale_substate_delivery
++#: model:mail.template,subject:sale_substate.mail_template_data_sale_substate_wait_docs
++msgid "Reception of {{object.name}}"
++msgstr "Recepción de {{object.name}}"
+ 
+ #. module: sale_substate
+ #: model_terms:ir.ui.view,arch_db:sale_substate.view_sales_order_filter
+-msgid "Substate"
+-msgstr "Subestado"
++msgid "Delivery State"
++msgstr "Estado de Entrega"
+ 
+ #. module: sale_substate
+-#: model:base.substate,name:sale_substate.base_substate_valid_docs
+-msgid "To validate legal documents"
+-msgstr "Para validar documentos legales"
++#. odoo-python
++#: code:addons/sale_substate/models/sale_order.py:0
++#, python-format
++msgid "Only draft or sent orders can be confirmed."
++msgstr "Solo los pedidos en borrador o enviados pueden ser confirmados."
+ 
+ #. module: sale_substate
+-#: model:base.substate,name:sale_substate.base_substate_wait_docs
+-#: model:mail.template,name:sale_substate.mail_template_data_sale_substate_wait_docs
+-msgid "Waiting for legal documents"
+-msgstr "A la espera de documentos legales"
++#. odoo-python
++#: code:addons/sale_substate/models/sale_order.py:0
++#, python-format
++msgid "Only confirmed sale orders can be delivered."
++msgstr "Solo los pedidos de venta confirmados pueden ser entregados."
+ 
+ #. module: sale_substate
+-#: model:base.substate,name:sale_substate.base_substate_won
+-msgid "Won"
+-msgstr "Ganado"
++#. odoo-python
++#: code:addons/sale_substate/models/sale_order.py:0
++#, python-format
++msgid "Only confirmed sale orders can be partially delivered."
++msgstr "Solo los pedidos de venta confirmados pueden ser entregados parcialmente."
+ 
++#. module: sale_substate
++#. odoo-python
++#: code:addons/sale_substate/models/sale_order.py:0
+ #, python-format
+-#~ msgid ""
+-#~ "The substate %(name)s is not defined for the state %(state)s but for "
+-#~ "%(target_state)s "
+-#~ msgstr ""
+-#~ "El subestado %(name)s no está definido para el estado %(state)s sino para "
+-#~ "%(target_state)s "
++msgid "No pending pickings found for this sale order."
++msgstr "No se encontraron picking pendientes para este pedido de venta."
+diff --git a/sale_substate/i18n/it.po b/sale_substate/i18n/it.po
+index f5e4823a..26fdb79c 100644
+--- a/sale_substate/i18n/it.po
++++ b/sale_substate/i18n/it.po
+@@ -111,101 +111,91 @@ msgstr ""
+ "            "
+ 
+ #. module: sale_substate
+-#: model:ir.model.fields,field_description:sale_substate.field_base_substate_type__model
+-msgid "Apply on"
+-msgstr "Applica a"
+-
+-#. module: sale_substate
+-#: model:ir.model,name:sale_substate.model_base_substate_type
+-msgid "Base Substate Type"
+-msgstr "Tipo substato base"
+-
+-#. module: sale_substate
+-#: model:base.substate,name:sale_substate.base_substate_delivered
++#: model:ir.model.fields.selection,name:sale_substate.selection__sale_order__delivery_state__delivered
++#: model_terms:ir.ui.view,arch_db:sale_substate.sale_order_view_form
+ msgid "Delivered"
+ msgstr "Consegnato"
+ 
+ #. module: sale_substate
+-#: model:base.substate,name:sale_substate.base_substate_in_delivery
+-msgid "In delivering"
+-msgstr "In consegna"
+-
+-#. module: sale_substate
+-#: model:mail.template,name:sale_substate.mail_template_data_sale_substate_delivery
+-msgid "In delivery"
+-msgstr "In cnsegna"
++#: model:ir.model.fields,field_description:sale_substate.field_sale_order__delivery_state
++msgid "Delivery State"
++msgstr "Stato di Consegna"
+ 
+ #. module: sale_substate
+-#: model:base.substate,name:sale_substate.base_substate_under_nego
+-msgid "In negotiation"
+-msgstr "In contrattazione"
++#: model:ir.model.fields.selection,name:sale_substate.selection__sale_order__delivery_state__no
++msgid "Nothing to Deliver"
++msgstr "Niente da Consegnare"
+ 
+ #. module: sale_substate
+-#: model:base.substate,name:sale_substate.base_substate_lost
+-msgid "Lost"
+-msgstr "Persa"
++#: model:ir.model.fields.selection,name:sale_substate.selection__sale_order__delivery_state__pending
++msgid "Pending Delivery"
++msgstr "In Attesa di Consegna"
+ 
+ #. module: sale_substate
+-#: model:target.state.value,name:sale_substate.target_state_value_draft
+-msgid "Quotation"
+-msgstr "Preventivo"
++#: model:ir.model.fields.selection,name:sale_substate.selection__sale_order__delivery_state__partial
++msgid "Partially Delivered"
++msgstr "Parzialmente Consegnato"
+ 
+ #. module: sale_substate
+-#: model:mail.template,subject:sale_substate.mail_template_data_sale_substate_delivery
+-#: model:mail.template,subject:sale_substate.mail_template_data_sale_substate_wait_docs
+-msgid "Reception of {{object.name}}"
+-msgstr "Ricezione di {{object.name}}"
++#: model_terms:ir.ui.view,arch_db:sale_substate.sale_order_view_form
++msgid "Partial Deliver"
++msgstr "Consegna Parziale"
+ 
+ #. module: sale_substate
+-#: model:target.state.value,name:sale_substate.target_state_value_sale
+-msgid "Sale"
+-msgstr "Vendita"
++#: model:ir.model.fields,help:sale_substate.field_sale_order__delivery_state
++msgid "Indicates whether the sale order delivery progress based on picking state."
++msgstr "Indica l'avanzamento della consegna dell'ordine di vendita basato sullo stato delle picking."
+ 
+ #. module: sale_substate
+-#: model:ir.model.fields.selection,name:sale_substate.selection__base_substate_type__model__sale_order
+-msgid "Sale order"
+-msgstr "Ordini di vendita"
++#: model:ir.model,name:sale_substate.model_sale_order
++msgid "Sales Order"
++msgstr "Ordine di vendita"
+ 
+ #. module: sale_substate
+-#: model:base.substate.type,name:sale_substate.base_substate_type_sale
+-msgid "Sale order Substate"
+-msgstr "Substato ordine di vendita"
++#: model:mail.template,name:sale_substate.mail_template_data_sale_substate_delivery
++msgid "In delivery"
++msgstr "In consegna"
+ 
+ #. module: sale_substate
+-#: model:ir.model,name:sale_substate.model_sale_order
+-msgid "Sales Order"
+-msgstr "Ordine di vendita"
++#: model:mail.template,name:sale_substate.mail_template_data_sale_substate_wait_docs
++msgid "Waiting for legal documents"
++msgstr "Attesa documenti legali"
+ 
+ #. module: sale_substate
+-#: model:ir.model.fields,field_description:sale_substate.field_sale_order__substate_id
+-msgid "Sub State"
+-msgstr "Substato"
++#: model:mail.template,subject:sale_substate.mail_template_data_sale_substate_delivery
++#: model:mail.template,subject:sale_substate.mail_template_data_sale_substate_wait_docs
++msgid "Reception of {{object.name}}"
++msgstr "Ricezione di {{object.name}}"
+ 
+ #. module: sale_substate
+ #: model_terms:ir.ui.view,arch_db:sale_substate.view_sales_order_filter
+-msgid "Substate"
+-msgstr "Substato"
++msgid "Delivery State"
++msgstr "Stato di Consegna"
+ 
+ #. module: sale_substate
+-#: model:base.substate,name:sale_substate.base_substate_valid_docs
+-msgid "To validate legal documents"
+-msgstr "Documenti legali da validare"
++#. odoo-python
++#: code:addons/sale_substate/models/sale_order.py:0
++#, python-format
++msgid "Only draft or sent orders can be confirmed."
++msgstr "Solo gli ordini in bozza o inviati possono essere confermati."
+ 
+ #. module: sale_substate
+-#: model:base.substate,name:sale_substate.base_substate_wait_docs
+-#: model:mail.template,name:sale_substate.mail_template_data_sale_substate_wait_docs
+-msgid "Waiting for legal documents"
+-msgstr "Attesa documenti legali"
++#. odoo-python
++#: code:addons/sale_substate/models/sale_order.py:0
++#, python-format
++msgid "Only confirmed sale orders can be delivered."
++msgstr "Solo gli ordini di vendita confermati possono essere consegnati."
+ 
+ #. module: sale_substate
+-#: model:base.substate,name:sale_substate.base_substate_won
+-msgid "Won"
+-msgstr "Vinta"
++#. odoo-python
++#: code:addons/sale_substate/models/sale_order.py:0
++#, python-format
++msgid "Only confirmed sale orders can be partially delivered."
++msgstr "Solo gli ordini di vendita confermati possono essere consegnati parzialmente."
+ 
++#. module: sale_substate
++#. odoo-python
++#: code:addons/sale_substate/models/sale_order.py:0
+ #, python-format
+-#~ msgid ""
+-#~ "The substate %(name)s is not defined for the state %(state)s but for "
+-#~ "%(target_state)s "
+-#~ msgstr ""
+-#~ "il substato %(name)s non è definito per lo sato %(state)s ma per "
+-#~ "%(target_state)s "
++msgid "No pending pickings found for this sale order."
++msgstr "Nessuna picking in attesa trovata per questo ordine di vendita."
+diff --git a/sale_substate/models/sale_order.py b/sale_substate/models/sale_order.py
+index 66409eb8..7368a13a 100644
+--- a/sale_substate/models/sale_order.py
++++ b/sale_substate/models/sale_order.py
+@@ -1,17 +1,112 @@
+ # Copyright 2019 Akretion
+ # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
+ 
+-from odoo import fields, models
++from odoo import _, api, fields, models
++from odoo.exceptions import UserError
+ 
+ 
+-class BaseSubstateType(models.Model):
+-    _inherit = "base.substate.type"
++class SaleOrder(models.Model):
++    _inherit = "sale.order"
+ 
+-    model = fields.Selection(
+-        selection_add=[("sale.order", "Sale order")], ondelete={"sale.order": "cascade"}
++    delivery_state = fields.Selection(
++        selection=[
++            ("no", "Nothing to Deliver"),
++            ("pending", "Pending Delivery"),
++            ("partial", "Partially Delivered"),
++            ("delivered", "Fully Delivered"),
++        ],
++        string="Delivery State",
++        compute="_compute_delivery_state",
++        store=True,
++        readonly=True,
++        default="no",
++        tracking=True,
++        help="Indicates whether the sale order delivery progress based on picking state.",
+     )
+ 
++    @api.depends(
++        "state",
++        "picking_ids",
++        "picking_ids.state",
++        "order_line.qty_delivered",
++        "order_line.product_uom_qty",
++    )
++    def _compute_delivery_state(self):
++        for order in self:
++            if order.state not in ("sale", "done"):
++                order.delivery_state = "no"
++                continue
++            lines = order.order_line.filtered(
++                lambda l: l.product_id and l.product_id.type != "service"
++            )
++            if not lines or all(l.product_uom_qty <= 0 for l in lines):
++                order.delivery_state = "no"
++                continue
++            total = sum(l.product_uom_qty for l in lines)
++            delivered = sum(l.qty_delivered for l in lines)
++            if delivered <= 0:
++                order.delivery_state = "pending"
++            elif delivered < total:
++                order.delivery_state = "partial"
++            else:
++                order.delivery_state = "delivered"
+ 
+-class SaleOrder(models.Model):
+-    _inherit = ["sale.order", "base.substate.mixin"]
+-    _name = "sale.order"
++    def action_confirm(self):
++        for order in self:
++            if order.state not in ("draft", "sent"):
++                raise UserError(
++                    _("Only draft or sent orders can be confirmed.")
++                )
++        res = super().action_confirm()
++        for order in self:
++            order._update_delivery_state_after_confirm()
++        return res
++
++    def _update_delivery_state_after_confirm(self):
++        self.ensure_one()
++        if not self._origin:
++            return
++        self.env.add_to_compute(self._fields["delivery_state"], self)
++
++    def action_deliver(self):
++        self.ensure_one()
++        if self.state not in ("sale",):
++            raise UserError(
++                _("Only confirmed sale orders can be delivered.")
++            )
++        pickings = self.picking_ids.filtered(
++            lambda p: p.state not in ("done", "cancel")
++        )
++        if not pickings:
++            raise UserError(_("No pending pickings found for this sale order."))
++        for picking in pickings:
++            for move in picking.move_ids:
++                if move.state in ("done", "cancel"):
++                    continue
++                move.quantity_done = move.product_uom_qty
++            picking.button_validate()
++        self.invalidate_cache(fnames=["delivery_state"], ids=self.ids)
++        return {"type": "ir.actions.client", "tag": "reload"}
++
++    def action_partial_deliver(self, qty_to_deliver=None):
++        self.ensure_one()
++        if self.state not in ("sale",):
++            raise UserError(
++                _("Only confirmed sale orders can be partially delivered.")
++            )
++        pickings = self.picking_ids.filtered(
++            lambda p: p.state not in ("done", "cancel")
++        )
++        if not pickings:
++            raise UserError(_("No pending pickings found for this sale order."))
++        for picking in pickings:
++            for move in picking.move_ids.filtered(
++                lambda m: m.state not in ("done", "cancel")
++            ):
++                if qty_to_deliver is not None and qty_to_deliver > 0:
++                    move.quantity_done = min(qty_to_deliver, move.product_uom_qty)
++                else:
++                    move.quantity_done = move.product_uom_qty / 2 if move.product_uom_qty > 0 else 0
++            picking.button_validate()
++        self.invalidate_cache(fnames=["delivery_state"], ids=self.ids)
++        return {"type": "ir.actions.client", "tag": "reload"}
+diff --git a/sale_substate/tests/__init__.py b/sale_substate/tests/__init__.py
+index ec06184e..74d69538 100644
+--- a/sale_substate/tests/__init__.py
++++ b/sale_substate/tests/__init__.py
+@@ -1 +1,2 @@
+ from . import test_sale_substate
++from . import test_sale_workflow
