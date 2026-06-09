@@ -1,0 +1,497 @@
+diff --git a/sale_automatic_workflow/models/automatic_workflow_job.py b/sale_automatic_workflow/models/automatic_workflow_job.py
+index 1352bf17..79037df9 100644
+--- a/sale_automatic_workflow/models/automatic_workflow_job.py
++++ b/sale_automatic_workflow/models/automatic_workflow_job.py
+@@ -35,11 +35,18 @@ class AutomaticWorkflowJob(models.Model):
+         " invoices, pickings..."
+     )
+ 
++    def _with_company_scope(self, records, company):
++        company = company or records.company_id
++        if not company:
++            return records
++        return records.with_context(allowed_company_ids=[company.id]).with_company(
++            company
++        )
++
+     def _do_validate_sale_order(self, sale, domain_filter):
+         """Validate a sales order, filter ensure no duplication"""
+-        if not self.env["sale.order"].search_count(
+-            [("id", "=", sale.id)] + domain_filter
+-        ):
++        sale = self._with_company_scope(sale, sale.company_id)
++        if not sale.env["sale.order"].search_count([("id", "=", sale.id)] + domain_filter):
+             return f"{sale.display_name} {sale} job bypassed"
+         sale.action_confirm()
+         return f"{sale.display_name} {sale} confirmed successfully"
+@@ -47,12 +54,13 @@ class AutomaticWorkflowJob(models.Model):
+     def _do_send_order_confirmation_mail(self, sale):
+         """Send order confirmation mail, while filtering to make sure the order is
+         confirmed with _do_validate_sale_order() function"""
+-        if not self.env["sale.order"].search_count(
++        sale = self._with_company_scope(sale, sale.company_id)
++        if not sale.env["sale.order"].search_count(
+             [("id", "=", sale.id), ("state", "=", "sale")]
+         ):
+             return f"{sale.display_name} {sale} job bypassed"
+         if sale.user_id:
+-            sale = sale.with_user(sale.user_id)
++            sale = self._with_company_scope(sale.with_user(sale.user_id), sale.company_id)
+         sale._send_order_confirmation_mail()
+         return f"{sale.display_name} {sale} send order confirmation mail successfully"
+ 
+@@ -63,21 +71,17 @@ class AutomaticWorkflowJob(models.Model):
+         _logger.debug("Sale Orders to validate: %s", sales.ids)
+         for sale in sales:
+             with savepoint(self.env.cr):
+-                self._do_validate_sale_order(
+-                    sale.with_company(sale.company_id), order_filter
+-                )
++                scoped_sale = self._with_company_scope(sale, sale.company_id)
++                self._do_validate_sale_order(scoped_sale, order_filter)
+                 if self.env.context.get("send_order_confirmation_mail"):
+-                    self._do_send_order_confirmation_mail(sale)
++                    self._do_send_order_confirmation_mail(scoped_sale)
+ 
+     def _do_create_invoice(self, sale, domain_filter):
+         """Create an invoice for a sales order, filter ensure no duplication"""
+-        if not self.env["sale.order"].search_count(
+-            [("id", "=", sale.id)] + domain_filter
+-        ):
++        sale = self._with_company_scope(sale, sale.company_id)
++        if not sale.env["sale.order"].search_count([("id", "=", sale.id)] + domain_filter):
+             return f"{sale.display_name} {sale} job bypassed"
+-        payment = self.env["sale.advance.payment.inv"].create(
+-            {"sale_order_ids": sale.ids}
+-        )
++        payment = sale.env["sale.advance.payment.inv"].create({"sale_order_ids": sale.ids})
+         payment.with_context(active_model="sale.order").create_invoices()
+         return f"{sale.display_name} {sale} create invoice successfully"
+ 
+@@ -88,17 +92,16 @@ class AutomaticWorkflowJob(models.Model):
+         _logger.debug("Sale Orders to create Invoice: %s", sales.ids)
+         for sale in sales:
+             with savepoint(self.env.cr):
+-                self._do_create_invoice(
+-                    sale.with_company(sale.company_id), create_filter
+-                )
++                self._do_create_invoice(self._with_company_scope(sale, sale.company_id), create_filter)
+ 
+     def _do_validate_invoice(self, invoice, domain_filter):
+         """Validate an invoice, filter ensure no duplication"""
+-        if not self.env["account.move"].search_count(
++        invoice = self._with_company_scope(invoice, invoice.company_id)
++        if not invoice.env["account.move"].search_count(
+             [("id", "=", invoice.id)] + domain_filter
+         ):
+             return f"{invoice.display_name} {invoice} job bypassed"
+-        invoice.with_company(invoice.company_id).action_post()
++        invoice.action_post()
+         return f"{invoice.display_name} {invoice} validate invoice successfully"
+ 
+     @api.model
+@@ -109,14 +112,14 @@ class AutomaticWorkflowJob(models.Model):
+         for invoice in invoices:
+             with savepoint(self.env.cr):
+                 self._do_validate_invoice(
+-                    invoice.with_company(invoice.company_id), validate_invoice_filter
++                    self._with_company_scope(invoice, invoice.company_id),
++                    validate_invoice_filter,
+                 )
+ 
+     def _do_sale_done(self, sale, domain_filter):
+         """Lock a sales order, filter ensure no duplication"""
+-        if not self.env["sale.order"].search_count(
+-            [("id", "=", sale.id)] + domain_filter
+-        ):
++        sale = self._with_company_scope(sale, sale.company_id)
++        if not sale.env["sale.order"].search_count([("id", "=", sale.id)] + domain_filter):
+             return f"{sale.display_name} {sale} job bypassed"
+         sale.action_lock()
+         return f"{sale.display_name} {sale} locked successfully"
+@@ -127,7 +130,7 @@ class AutomaticWorkflowJob(models.Model):
+         _logger.debug("Sale Orders to done: %s", sales.ids)
+         for sale in sales:
+             with savepoint(self.env.cr):
+-                self._do_sale_done(sale.with_company(sale.company_id), sale_done_filter)
++                self._do_sale_done(self._with_company_scope(sale, sale.company_id), sale_done_filter)
+ 
+     def _prepare_dict_account_payment(self, invoice):
+         partner_type = (
+@@ -151,11 +154,14 @@ class AutomaticWorkflowJob(models.Model):
+         _logger.debug("Invoices to Register Payment: %s", invoices.ids)
+         for invoice in invoices:
+             with savepoint(self.env.cr):
+-                self._register_payment_invoice(invoice)
++                self._register_payment_invoice(
++                    self._with_company_scope(invoice, invoice.company_id)
++                )
+         return
+ 
+     def _register_payment_invoice(self, invoice):
+-        payment = self.env["account.payment"].create(
++        invoice = self._with_company_scope(invoice, invoice.company_id)
++        payment = invoice.env["account.payment"].create(
+             self._prepare_dict_account_payment(invoice)
+         )
+         payment.action_post()
+diff --git a/sale_procurement_group_by_line/model/sale.py b/sale_procurement_group_by_line/model/sale.py
+index d0d42b44..90122ab5 100644
+--- a/sale_procurement_group_by_line/model/sale.py
++++ b/sale_procurement_group_by_line/model/sale.py
+@@ -25,22 +25,78 @@ class SaleOrderLine(models.Model):
+         """
+         return 8, self.order_id.id
+ 
++    def _with_procurement_company_scope(self):
++        self.ensure_one()
++        return self.with_context(allowed_company_ids=[self.company_id.id]).with_company(
++            self.company_id
++        )
++
++    def _invalidate_known_fields(self, records, field_names):
++        existing_fields = [field_name for field_name in field_names if field_name in records._fields]
++        if existing_fields:
++            records.invalidate_recordset(existing_fields)
++
++    def _invalidate_procurement_cache(self, products=None, orders=None):
++        orders = orders or self.mapped("order_id")
++        products = products or self.mapped("product_id")
++        product_templates = products.mapped("product_tmpl_id")
++        warehouses = orders.mapped("warehouse_id")
++        self._invalidate_known_fields(
++            self,
++            [
++                "company_id",
++                "order_id",
++                "product_id",
++                "product_uom",
++                "product_uom_qty",
++                "procurement_group_id",
++                "route_id",
++                "move_ids",
++            ],
++        )
++        self._invalidate_known_fields(
++            orders,
++            [
++                "company_id",
++                "warehouse_id",
++                "partner_shipping_id",
++                "picking_policy",
++                "procurement_group_id",
++                "order_line",
++            ],
++        )
++        self._invalidate_known_fields(
++            products,
++            ["type", "uom_id", "route_ids", "product_tmpl_id", "categ_id"],
++        )
++        self._invalidate_known_fields(product_templates, ["route_ids", "categ_id"])
++        self._invalidate_known_fields(warehouses, ["company_id", "out_type_id", "route_ids"])
++
++    def write(self, vals):
++        orders = self.mapped("order_id")
++        products = self.mapped("product_id")
++        res = super().write(vals)
++        if {"product_id", "product_uom", "product_uom_qty", "route_id"}.intersection(vals):
++            self._invalidate_procurement_cache(products=products | self.mapped("product_id"), orders=orders)
++        return res
++
+     def _action_launch_stock_rule(self, previous_product_uom_qty=False):
+         """
+         Launch procurement group run method.
+         """
+         if self._context.get("skip_procurement"):
+             return True
++        self._invalidate_procurement_cache()
+         precision = self.env["decimal.precision"].precision_get(
+             "Product Unit of Measure"
+         )
+-        procurements = []
++        procurements = {}
+         groups = {}
+         procured_line_ids = set()
+         if not previous_product_uom_qty:
+             previous_product_uom_qty = {}
+         for line in self:
+-            line = line.with_company(line.company_id)
++            line = line._with_procurement_company_scope()
+             if (
+                 line.state != "sale"
+                 or line.order_id.locked
+@@ -56,8 +112,6 @@ class SaleOrderLine(models.Model):
+ 
+             group_id = line._get_procurement_group()
+ 
+-            # Group the sales order lines with same procurement group
+-            # according to the group key
+             for order_line in line.order_id.order_line:
+                 g_id = order_line.procurement_group_id or False
+                 if g_id:
+@@ -67,12 +121,9 @@ class SaleOrderLine(models.Model):
+ 
+             if not group_id:
+                 vals = line._prepare_procurement_group_vals()
+-                group_id = self.env["procurement.group"].create(vals)
++                group_id = line.env["procurement.group"].create(vals)
+                 line.order_id.procurement_group_id = group_id
+             else:
+-                # In case the procurement group is already created and the
+-                # order was cancelled, we need to update certain values
+-                # of the group.
+                 updated_vals = {}
+                 if group_id.partner_id != line.order_id.partner_shipping_id:
+                     updated_vals.update(
+@@ -97,26 +148,38 @@ class SaleOrderLine(models.Model):
+             product_qty, procurement_uom = line_uom._adjust_uom_quantities(
+                 product_qty, quant_uom
+             )
+-            procurements += line._create_procurements(
++            procurements.setdefault(line.company_id.id, {"company": line.company_id, "values": []})[
++                "values"
++            ] += line._create_procurements(
+                 product_qty, procurement_uom, origin, values
+             )
+             procured_line_ids.add(line.id)
+-            # We store the procured quantity in the UoM of the line to avoid
+-            # duplicated procurements, specially for dropshipping and kits.
+             previous_product_uom_qty[line.id] = line.product_uom_qty
+-        if procurements:
+-            self.env["procurement.group"].run(procurements)
+-        # This next block is currently needed only because the scheduler trigger is done
+-        # by picking confirmation rather than stock.move confirmation
++        for data in procurements.values():
++            self.with_context(allowed_company_ids=[data["company"].id]).with_company(
++                data["company"]
++            ).env["procurement.group"].run(data["values"])
+         orders = self.mapped("order_id")
+         for order in orders:
++            order = order.with_context(allowed_company_ids=[order.company_id.id]).with_company(
++                order.company_id
++            )
+             pickings_to_confirm = order.picking_ids.filtered(
+                 lambda p: p.state not in ["cancel", "done"]
+             )
+             if pickings_to_confirm:
+-                # Trigger the Scheduler for Pickings
+                 pickings_to_confirm.action_confirm()
+         remaining_lines = self - self.browse(procured_line_ids)
+-        return super(
+-            SaleOrderLine, remaining_lines.with_context(sale_group_by_line=True)
+-        )._action_launch_stock_rule(previous_product_uom_qty=previous_product_uom_qty)
++        result = True
++        for company in remaining_lines.mapped("company_id"):
++            company_lines = remaining_lines.filtered(
++                lambda line, company=company: line.company_id == company
++            )
++            scoped_lines = company_lines.with_context(
++                sale_group_by_line=True,
++                allowed_company_ids=[company.id],
++            ).with_company(company)
++            result = super(SaleOrderLine, scoped_lines)._action_launch_stock_rule(
++                previous_product_uom_qty=previous_product_uom_qty
++            )
++        return result
+diff --git a/sale_procurement_group_by_line/tests/test_sale_procurement_group_by_line.py b/sale_procurement_group_by_line/tests/test_sale_procurement_group_by_line.py
+index e7a111eb..d4c10ad2 100644
+--- a/sale_procurement_group_by_line/tests/test_sale_procurement_group_by_line.py
++++ b/sale_procurement_group_by_line/tests/test_sale_procurement_group_by_line.py
+@@ -6,12 +6,13 @@
+ from odoo.tests import Form
+ from odoo.tests.common import TransactionCase
+ 
++from odoo.addons.account.tests.common import AccountTestInvoicingCommon
++
+ 
+ class TestSaleProcurementGroupByLine(TransactionCase):
+     @classmethod
+     def setUpClass(cls):
+         super().setUpClass()
+-        # Required Models
+         cls.product_model = cls.env["product.product"]
+         cls.product_ctg_model = cls.env["product.category"]
+         cls.proc_group_model = cls.env["procurement.group"]
+@@ -20,17 +21,11 @@ class TestSaleProcurementGroupByLine(TransactionCase):
+         cls.location_model = cls.env["stock.location"]
+         cls.route_model = cls.env["stock.route"]
+         cls.rule_model = cls.env["stock.rule"]
+-        # Customer
+         cls.customer = cls.env.ref("base.res_partner_2")
+-        # Warehouse
+         cls.warehouse_id = cls.env.ref("stock.warehouse0")
+-
+-        # Create product category
+         cls.product_ctg = cls._create_product_category()
+-        # Create Products
+         cls.new_product1 = cls._create_product("test_product1")
+         cls.new_product2 = cls._create_product("test_product2")
+-        # Create internal destination location
+         cls.internal_dest = cls.location_model.create(
+             {
+                 "name": "Internal Consumed-in-Testing",
+@@ -38,8 +33,6 @@ class TestSaleProcurementGroupByLine(TransactionCase):
+                 "location_id": cls.warehouse_id.view_location_id.id,
+             }
+         )
+-        # Create route to pull stock
+-        # from the warehouse to internal location
+         cls.internal_route = cls.route_model.create(
+             {
+                 "name": "Stock -> Internal Test Dest",
+@@ -59,7 +52,6 @@ class TestSaleProcurementGroupByLine(TransactionCase):
+                 "warehouse_id": cls.warehouse_id.id,
+             }
+         )
+-        # Create product with internal destination route
+         cls.product_internal_dest = cls.product_model.create(
+             {
+                 "name": "test_product_internal_dest",
+@@ -68,11 +60,9 @@ class TestSaleProcurementGroupByLine(TransactionCase):
+                 "route_ids": [(6, 0, [cls.internal_route.id])],
+             }
+         )
+-        # Create customer pointing to internal delivery location
+         cls.customer_internal = cls.customer.copy(
+             {"property_stock_customer": cls.internal_dest.id}
+         )
+-        # Create sale order
+         cls.sale = cls._create_sale_order()
+ 
+     @classmethod
+@@ -89,7 +79,6 @@ class TestSaleProcurementGroupByLine(TransactionCase):
+ 
+     @classmethod
+     def _create_sale_order(cls):
+-        """Create a Sale Order."""
+         cls.sale = cls.sale_model.create(
+             {
+                 "partner_id": cls.customer.id,
+@@ -169,9 +158,6 @@ class TestSaleProcurementGroupByLine(TransactionCase):
+         )
+ 
+     def test_05_merged_stock_moves_from_same_procurement(self):
+-        """
+-        Reduce the qty in the sale order and check no extra picking is created
+-        """
+         self.sale.action_confirm()
+         self.sale.order_line[1].product_uom_qty = 0.0
+         self.assertEqual(
+@@ -179,10 +165,6 @@ class TestSaleProcurementGroupByLine(TransactionCase):
+         )
+ 
+     def test_06_update_sale_order_line_respect_procurement_group(self):
+-        """
+-        When launching the stock rule again,
+-        use maintain same procurement group in lines
+-        """
+         self.sale.action_confirm()
+         proc_group = self.sale.order_line[1].procurement_group_id
+         self.assertEqual(len(self.line1.move_ids), 1)
+@@ -191,10 +173,6 @@ class TestSaleProcurementGroupByLine(TransactionCase):
+         self.assertEqual(len(self.line1.move_ids), 1)
+ 
+     def test_07_no_duplicate_procurement_final_location_is_internal(self):
+-        """
+-        Ensure we don't create duplicate stock moves when SO line is delivered
+-        to an internal location instead of a customer location
+-        """
+         sale = self.sale_model.create(
+             {
+                 "partner_id": self.customer_internal.id,
+@@ -212,7 +190,94 @@ class TestSaleProcurementGroupByLine(TransactionCase):
+         )
+         sale.action_confirm()
+         moves = line.move_ids.filtered(lambda m: m.state != "cancel")
+-        # Check that only ONE move was created
+         self.assertEqual(len(moves), 1)
+         self.assertEqual(moves.product_uom_qty, 3.0)
+         self.assertEqual(moves.location_final_id, self.internal_dest)
++
++
++class TestSaleProcurementGroupByLineMultiCompany(AccountTestInvoicingCommon):
++    @classmethod
++    def setUpClass(cls, chart_template_ref=None):
++        super().setUpClass(chart_template_ref=chart_template_ref)
++        cls.main_company = cls.env.ref("base.main_company")
++        cls.other_company = cls.setup_other_company(
++            name="Procurement Group By Line Company",
++            currency_id=cls.env.ref("base.EUR").id,
++            country_id=cls.env.ref("base.fr").id,
++        )["company"]
++        cls.env.user.company_ids |= cls.other_company
++        cls.env.user.company_id = cls.main_company
++        cls.customer = cls.env["res.partner"].create({"name": "Procurement Customer"})
++        cls.warehouse = cls.env["stock.warehouse"].search(
++            [("company_id", "=", cls.other_company.id)], limit=1
++        )
++        cls.service_product = cls.env["product.product"].with_company(
++            cls.other_company
++        ).create(
++            {
++                "name": "Procurement Service",
++                "type": "service",
++                "list_price": 10.0,
++            }
++        )
++        cls.stock_product = cls.env["product.product"].with_company(
++            cls.other_company
++        ).create(
++            {
++                "name": "Procurement Storable",
++                "type": "consu",
++                "is_storable": True,
++                "list_price": 20.0,
++            }
++        )
++        inventory = cls.env["stock.quant"].with_company(cls.other_company).create(
++            {
++                "product_id": cls.stock_product.id,
++                "location_id": cls.warehouse.lot_stock_id.id,
++                "inventory_quantity": 5.0,
++            }
++        )
++        inventory._apply_inventory()
++
++    def _create_other_company_sale(self):
++        return self.env["sale.order"].with_company(self.other_company).create(
++            {
++                "partner_id": self.customer.id,
++                "company_id": self.other_company.id,
++                "warehouse_id": self.warehouse.id,
++                "picking_policy": "direct",
++                "order_line": [
++                    (
++                        0,
++                        0,
++                        {
++                            "product_id": self.service_product.id,
++                            "name": self.service_product.name,
++                            "product_uom": self.service_product.uom_id.id,
++                            "product_uom_qty": 1.0,
++                            "price_unit": self.service_product.list_price,
++                        },
++                    )
++                ],
++            }
++        )
++
++    def test_08_product_switch_keeps_company_scoped_procurement(self):
++        sale = self._create_other_company_sale()
++        line = sale.order_line
++        self.assertEqual(line.product_id.type, "service")
++        line.write(
++            {
++                "product_id": self.stock_product.id,
++                "name": self.stock_product.name,
++                "product_uom": self.stock_product.uom_id.id,
++                "price_unit": self.stock_product.list_price,
++            }
++        )
++        self.assertEqual(line.product_id.type, "consu")
++        sale.sudo().with_context(allowed_company_ids=[self.main_company.id]).with_company(
++            self.main_company
++        ).action_confirm()
++        self.assertEqual(sale.state, "sale")
++        self.assertTrue(sale.picking_ids)
++        self.assertEqual(sale.picking_ids.picking_type_id.company_id, self.other_company)

@@ -25,22 +25,78 @@ class SaleOrderLine(models.Model):
         """
         return 8, self.order_id.id
 
+    def _with_procurement_company_scope(self):
+        self.ensure_one()
+        return self.with_context(allowed_company_ids=[self.company_id.id]).with_company(
+            self.company_id
+        )
+
+    def _invalidate_known_fields(self, records, field_names):
+        existing_fields = [field_name for field_name in field_names if field_name in records._fields]
+        if existing_fields:
+            records.invalidate_recordset(existing_fields)
+
+    def _invalidate_procurement_cache(self, products=None, orders=None):
+        orders = orders or self.mapped("order_id")
+        products = products or self.mapped("product_id")
+        product_templates = products.mapped("product_tmpl_id")
+        warehouses = orders.mapped("warehouse_id")
+        self._invalidate_known_fields(
+            self,
+            [
+                "company_id",
+                "order_id",
+                "product_id",
+                "product_uom",
+                "product_uom_qty",
+                "procurement_group_id",
+                "route_id",
+                "move_ids",
+            ],
+        )
+        self._invalidate_known_fields(
+            orders,
+            [
+                "company_id",
+                "warehouse_id",
+                "partner_shipping_id",
+                "picking_policy",
+                "procurement_group_id",
+                "order_line",
+            ],
+        )
+        self._invalidate_known_fields(
+            products,
+            ["type", "uom_id", "route_ids", "product_tmpl_id", "categ_id"],
+        )
+        self._invalidate_known_fields(product_templates, ["route_ids", "categ_id"])
+        self._invalidate_known_fields(warehouses, ["company_id", "out_type_id", "route_ids"])
+
+    def write(self, vals):
+        orders = self.mapped("order_id")
+        products = self.mapped("product_id")
+        res = super().write(vals)
+        if {"product_id", "product_uom", "product_uom_qty", "route_id"}.intersection(vals):
+            self._invalidate_procurement_cache(products=products | self.mapped("product_id"), orders=orders)
+        return res
+
     def _action_launch_stock_rule(self, previous_product_uom_qty=False):
         """
         Launch procurement group run method.
         """
         if self._context.get("skip_procurement"):
             return True
+        self._invalidate_procurement_cache()
         precision = self.env["decimal.precision"].precision_get(
             "Product Unit of Measure"
         )
-        procurements = []
+        procurements = {}
         groups = {}
         procured_line_ids = set()
         if not previous_product_uom_qty:
             previous_product_uom_qty = {}
         for line in self:
-            line = line.with_company(line.company_id)
+            line = line._with_procurement_company_scope()
             if (
                 line.state != "sale"
                 or line.order_id.locked
@@ -56,8 +112,6 @@ class SaleOrderLine(models.Model):
 
             group_id = line._get_procurement_group()
 
-            # Group the sales order lines with same procurement group
-            # according to the group key
             for order_line in line.order_id.order_line:
                 g_id = order_line.procurement_group_id or False
                 if g_id:
@@ -67,12 +121,9 @@ class SaleOrderLine(models.Model):
 
             if not group_id:
                 vals = line._prepare_procurement_group_vals()
-                group_id = self.env["procurement.group"].create(vals)
+                group_id = line.env["procurement.group"].create(vals)
                 line.order_id.procurement_group_id = group_id
             else:
-                # In case the procurement group is already created and the
-                # order was cancelled, we need to update certain values
-                # of the group.
                 updated_vals = {}
                 if group_id.partner_id != line.order_id.partner_shipping_id:
                     updated_vals.update(
@@ -97,26 +148,38 @@ class SaleOrderLine(models.Model):
             product_qty, procurement_uom = line_uom._adjust_uom_quantities(
                 product_qty, quant_uom
             )
-            procurements += line._create_procurements(
+            procurements.setdefault(line.company_id.id, {"company": line.company_id, "values": []})[
+                "values"
+            ] += line._create_procurements(
                 product_qty, procurement_uom, origin, values
             )
             procured_line_ids.add(line.id)
-            # We store the procured quantity in the UoM of the line to avoid
-            # duplicated procurements, specially for dropshipping and kits.
             previous_product_uom_qty[line.id] = line.product_uom_qty
-        if procurements:
-            self.env["procurement.group"].run(procurements)
-        # This next block is currently needed only because the scheduler trigger is done
-        # by picking confirmation rather than stock.move confirmation
+        for data in procurements.values():
+            self.with_context(allowed_company_ids=[data["company"].id]).with_company(
+                data["company"]
+            ).env["procurement.group"].run(data["values"])
         orders = self.mapped("order_id")
         for order in orders:
+            order = order.with_context(allowed_company_ids=[order.company_id.id]).with_company(
+                order.company_id
+            )
             pickings_to_confirm = order.picking_ids.filtered(
                 lambda p: p.state not in ["cancel", "done"]
             )
             if pickings_to_confirm:
-                # Trigger the Scheduler for Pickings
                 pickings_to_confirm.action_confirm()
         remaining_lines = self - self.browse(procured_line_ids)
-        return super(
-            SaleOrderLine, remaining_lines.with_context(sale_group_by_line=True)
-        )._action_launch_stock_rule(previous_product_uom_qty=previous_product_uom_qty)
+        result = True
+        for company in remaining_lines.mapped("company_id"):
+            company_lines = remaining_lines.filtered(
+                lambda line, company=company: line.company_id == company
+            )
+            scoped_lines = company_lines.with_context(
+                sale_group_by_line=True,
+                allowed_company_ids=[company.id],
+            ).with_company(company)
+            result = super(SaleOrderLine, scoped_lines)._action_launch_stock_rule(
+                previous_product_uom_qty=previous_product_uom_qty
+            )
+        return result

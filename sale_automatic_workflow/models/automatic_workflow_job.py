@@ -35,11 +35,18 @@ class AutomaticWorkflowJob(models.Model):
         " invoices, pickings..."
     )
 
+    def _with_company_scope(self, records, company):
+        company = company or records.company_id
+        if not company:
+            return records
+        return records.with_context(allowed_company_ids=[company.id]).with_company(
+            company
+        )
+
     def _do_validate_sale_order(self, sale, domain_filter):
         """Validate a sales order, filter ensure no duplication"""
-        if not self.env["sale.order"].search_count(
-            [("id", "=", sale.id)] + domain_filter
-        ):
+        sale = self._with_company_scope(sale, sale.company_id)
+        if not sale.env["sale.order"].search_count([("id", "=", sale.id)] + domain_filter):
             return f"{sale.display_name} {sale} job bypassed"
         sale.action_confirm()
         return f"{sale.display_name} {sale} confirmed successfully"
@@ -47,12 +54,13 @@ class AutomaticWorkflowJob(models.Model):
     def _do_send_order_confirmation_mail(self, sale):
         """Send order confirmation mail, while filtering to make sure the order is
         confirmed with _do_validate_sale_order() function"""
-        if not self.env["sale.order"].search_count(
+        sale = self._with_company_scope(sale, sale.company_id)
+        if not sale.env["sale.order"].search_count(
             [("id", "=", sale.id), ("state", "=", "sale")]
         ):
             return f"{sale.display_name} {sale} job bypassed"
         if sale.user_id:
-            sale = sale.with_user(sale.user_id)
+            sale = self._with_company_scope(sale.with_user(sale.user_id), sale.company_id)
         sale._send_order_confirmation_mail()
         return f"{sale.display_name} {sale} send order confirmation mail successfully"
 
@@ -63,21 +71,17 @@ class AutomaticWorkflowJob(models.Model):
         _logger.debug("Sale Orders to validate: %s", sales.ids)
         for sale in sales:
             with savepoint(self.env.cr):
-                self._do_validate_sale_order(
-                    sale.with_company(sale.company_id), order_filter
-                )
+                scoped_sale = self._with_company_scope(sale, sale.company_id)
+                self._do_validate_sale_order(scoped_sale, order_filter)
                 if self.env.context.get("send_order_confirmation_mail"):
-                    self._do_send_order_confirmation_mail(sale)
+                    self._do_send_order_confirmation_mail(scoped_sale)
 
     def _do_create_invoice(self, sale, domain_filter):
         """Create an invoice for a sales order, filter ensure no duplication"""
-        if not self.env["sale.order"].search_count(
-            [("id", "=", sale.id)] + domain_filter
-        ):
+        sale = self._with_company_scope(sale, sale.company_id)
+        if not sale.env["sale.order"].search_count([("id", "=", sale.id)] + domain_filter):
             return f"{sale.display_name} {sale} job bypassed"
-        payment = self.env["sale.advance.payment.inv"].create(
-            {"sale_order_ids": sale.ids}
-        )
+        payment = sale.env["sale.advance.payment.inv"].create({"sale_order_ids": sale.ids})
         payment.with_context(active_model="sale.order").create_invoices()
         return f"{sale.display_name} {sale} create invoice successfully"
 
@@ -88,17 +92,16 @@ class AutomaticWorkflowJob(models.Model):
         _logger.debug("Sale Orders to create Invoice: %s", sales.ids)
         for sale in sales:
             with savepoint(self.env.cr):
-                self._do_create_invoice(
-                    sale.with_company(sale.company_id), create_filter
-                )
+                self._do_create_invoice(self._with_company_scope(sale, sale.company_id), create_filter)
 
     def _do_validate_invoice(self, invoice, domain_filter):
         """Validate an invoice, filter ensure no duplication"""
-        if not self.env["account.move"].search_count(
+        invoice = self._with_company_scope(invoice, invoice.company_id)
+        if not invoice.env["account.move"].search_count(
             [("id", "=", invoice.id)] + domain_filter
         ):
             return f"{invoice.display_name} {invoice} job bypassed"
-        invoice.with_company(invoice.company_id).action_post()
+        invoice.action_post()
         return f"{invoice.display_name} {invoice} validate invoice successfully"
 
     @api.model
@@ -109,14 +112,14 @@ class AutomaticWorkflowJob(models.Model):
         for invoice in invoices:
             with savepoint(self.env.cr):
                 self._do_validate_invoice(
-                    invoice.with_company(invoice.company_id), validate_invoice_filter
+                    self._with_company_scope(invoice, invoice.company_id),
+                    validate_invoice_filter,
                 )
 
     def _do_sale_done(self, sale, domain_filter):
         """Lock a sales order, filter ensure no duplication"""
-        if not self.env["sale.order"].search_count(
-            [("id", "=", sale.id)] + domain_filter
-        ):
+        sale = self._with_company_scope(sale, sale.company_id)
+        if not sale.env["sale.order"].search_count([("id", "=", sale.id)] + domain_filter):
             return f"{sale.display_name} {sale} job bypassed"
         sale.action_lock()
         return f"{sale.display_name} {sale} locked successfully"
@@ -127,7 +130,7 @@ class AutomaticWorkflowJob(models.Model):
         _logger.debug("Sale Orders to done: %s", sales.ids)
         for sale in sales:
             with savepoint(self.env.cr):
-                self._do_sale_done(sale.with_company(sale.company_id), sale_done_filter)
+                self._do_sale_done(self._with_company_scope(sale, sale.company_id), sale_done_filter)
 
     def _prepare_dict_account_payment(self, invoice):
         partner_type = (
@@ -151,11 +154,14 @@ class AutomaticWorkflowJob(models.Model):
         _logger.debug("Invoices to Register Payment: %s", invoices.ids)
         for invoice in invoices:
             with savepoint(self.env.cr):
-                self._register_payment_invoice(invoice)
+                self._register_payment_invoice(
+                    self._with_company_scope(invoice, invoice.company_id)
+                )
         return
 
     def _register_payment_invoice(self, invoice):
-        payment = self.env["account.payment"].create(
+        invoice = self._with_company_scope(invoice, invoice.company_id)
+        payment = invoice.env["account.payment"].create(
             self._prepare_dict_account_payment(invoice)
         )
         payment.action_post()

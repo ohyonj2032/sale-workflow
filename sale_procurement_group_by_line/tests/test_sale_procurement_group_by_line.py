@@ -6,12 +6,13 @@
 from odoo.tests import Form
 from odoo.tests.common import TransactionCase
 
+from odoo.addons.account.tests.common import AccountTestInvoicingCommon
+
 
 class TestSaleProcurementGroupByLine(TransactionCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        # Required Models
         cls.product_model = cls.env["product.product"]
         cls.product_ctg_model = cls.env["product.category"]
         cls.proc_group_model = cls.env["procurement.group"]
@@ -20,17 +21,11 @@ class TestSaleProcurementGroupByLine(TransactionCase):
         cls.location_model = cls.env["stock.location"]
         cls.route_model = cls.env["stock.route"]
         cls.rule_model = cls.env["stock.rule"]
-        # Customer
         cls.customer = cls.env.ref("base.res_partner_2")
-        # Warehouse
         cls.warehouse_id = cls.env.ref("stock.warehouse0")
-
-        # Create product category
         cls.product_ctg = cls._create_product_category()
-        # Create Products
         cls.new_product1 = cls._create_product("test_product1")
         cls.new_product2 = cls._create_product("test_product2")
-        # Create internal destination location
         cls.internal_dest = cls.location_model.create(
             {
                 "name": "Internal Consumed-in-Testing",
@@ -38,8 +33,6 @@ class TestSaleProcurementGroupByLine(TransactionCase):
                 "location_id": cls.warehouse_id.view_location_id.id,
             }
         )
-        # Create route to pull stock
-        # from the warehouse to internal location
         cls.internal_route = cls.route_model.create(
             {
                 "name": "Stock -> Internal Test Dest",
@@ -59,7 +52,6 @@ class TestSaleProcurementGroupByLine(TransactionCase):
                 "warehouse_id": cls.warehouse_id.id,
             }
         )
-        # Create product with internal destination route
         cls.product_internal_dest = cls.product_model.create(
             {
                 "name": "test_product_internal_dest",
@@ -68,11 +60,9 @@ class TestSaleProcurementGroupByLine(TransactionCase):
                 "route_ids": [(6, 0, [cls.internal_route.id])],
             }
         )
-        # Create customer pointing to internal delivery location
         cls.customer_internal = cls.customer.copy(
             {"property_stock_customer": cls.internal_dest.id}
         )
-        # Create sale order
         cls.sale = cls._create_sale_order()
 
     @classmethod
@@ -89,7 +79,6 @@ class TestSaleProcurementGroupByLine(TransactionCase):
 
     @classmethod
     def _create_sale_order(cls):
-        """Create a Sale Order."""
         cls.sale = cls.sale_model.create(
             {
                 "partner_id": cls.customer.id,
@@ -169,9 +158,6 @@ class TestSaleProcurementGroupByLine(TransactionCase):
         )
 
     def test_05_merged_stock_moves_from_same_procurement(self):
-        """
-        Reduce the qty in the sale order and check no extra picking is created
-        """
         self.sale.action_confirm()
         self.sale.order_line[1].product_uom_qty = 0.0
         self.assertEqual(
@@ -179,10 +165,6 @@ class TestSaleProcurementGroupByLine(TransactionCase):
         )
 
     def test_06_update_sale_order_line_respect_procurement_group(self):
-        """
-        When launching the stock rule again,
-        use maintain same procurement group in lines
-        """
         self.sale.action_confirm()
         proc_group = self.sale.order_line[1].procurement_group_id
         self.assertEqual(len(self.line1.move_ids), 1)
@@ -191,10 +173,6 @@ class TestSaleProcurementGroupByLine(TransactionCase):
         self.assertEqual(len(self.line1.move_ids), 1)
 
     def test_07_no_duplicate_procurement_final_location_is_internal(self):
-        """
-        Ensure we don't create duplicate stock moves when SO line is delivered
-        to an internal location instead of a customer location
-        """
         sale = self.sale_model.create(
             {
                 "partner_id": self.customer_internal.id,
@@ -212,7 +190,94 @@ class TestSaleProcurementGroupByLine(TransactionCase):
         )
         sale.action_confirm()
         moves = line.move_ids.filtered(lambda m: m.state != "cancel")
-        # Check that only ONE move was created
         self.assertEqual(len(moves), 1)
         self.assertEqual(moves.product_uom_qty, 3.0)
         self.assertEqual(moves.location_final_id, self.internal_dest)
+
+
+class TestSaleProcurementGroupByLineMultiCompany(AccountTestInvoicingCommon):
+    @classmethod
+    def setUpClass(cls, chart_template_ref=None):
+        super().setUpClass(chart_template_ref=chart_template_ref)
+        cls.main_company = cls.env.ref("base.main_company")
+        cls.other_company = cls.setup_other_company(
+            name="Procurement Group By Line Company",
+            currency_id=cls.env.ref("base.EUR").id,
+            country_id=cls.env.ref("base.fr").id,
+        )["company"]
+        cls.env.user.company_ids |= cls.other_company
+        cls.env.user.company_id = cls.main_company
+        cls.customer = cls.env["res.partner"].create({"name": "Procurement Customer"})
+        cls.warehouse = cls.env["stock.warehouse"].search(
+            [("company_id", "=", cls.other_company.id)], limit=1
+        )
+        cls.service_product = cls.env["product.product"].with_company(
+            cls.other_company
+        ).create(
+            {
+                "name": "Procurement Service",
+                "type": "service",
+                "list_price": 10.0,
+            }
+        )
+        cls.stock_product = cls.env["product.product"].with_company(
+            cls.other_company
+        ).create(
+            {
+                "name": "Procurement Storable",
+                "type": "consu",
+                "is_storable": True,
+                "list_price": 20.0,
+            }
+        )
+        inventory = cls.env["stock.quant"].with_company(cls.other_company).create(
+            {
+                "product_id": cls.stock_product.id,
+                "location_id": cls.warehouse.lot_stock_id.id,
+                "inventory_quantity": 5.0,
+            }
+        )
+        inventory._apply_inventory()
+
+    def _create_other_company_sale(self):
+        return self.env["sale.order"].with_company(self.other_company).create(
+            {
+                "partner_id": self.customer.id,
+                "company_id": self.other_company.id,
+                "warehouse_id": self.warehouse.id,
+                "picking_policy": "direct",
+                "order_line": [
+                    (
+                        0,
+                        0,
+                        {
+                            "product_id": self.service_product.id,
+                            "name": self.service_product.name,
+                            "product_uom": self.service_product.uom_id.id,
+                            "product_uom_qty": 1.0,
+                            "price_unit": self.service_product.list_price,
+                        },
+                    )
+                ],
+            }
+        )
+
+    def test_08_product_switch_keeps_company_scoped_procurement(self):
+        sale = self._create_other_company_sale()
+        line = sale.order_line
+        self.assertEqual(line.product_id.type, "service")
+        line.write(
+            {
+                "product_id": self.stock_product.id,
+                "name": self.stock_product.name,
+                "product_uom": self.stock_product.uom_id.id,
+                "price_unit": self.stock_product.list_price,
+            }
+        )
+        self.assertEqual(line.product_id.type, "consu")
+        sale.sudo().with_context(allowed_company_ids=[self.main_company.id]).with_company(
+            self.main_company
+        ).action_confirm()
+        self.assertEqual(sale.state, "sale")
+        self.assertTrue(sale.picking_ids)
+        self.assertEqual(sale.picking_ids.picking_type_id.company_id, self.other_company)
