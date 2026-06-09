@@ -5,6 +5,19 @@
         <field name="model">sale.order</field>
         <field name="inherit_id" ref="sale.view_order_form" />
         <field name="arch" type="xml">
+            <xpath expr="//header/button[@name='action_quotation_send']" position="before">
+                <button
+                    name="action_release_credit"
+                    type="object"
+                    string="Release Credit"
+                    class="btn-primary"
+                    groups="sale_delivery_state.group_sale_credit_manager"
+                    invisible="state != 'credit_hold'"
+                />
+            </xpath>
+            <xpath expr="//field[@name='state']" position="attributes">
+                <attribute name="statusbar_visible">draft,sent,credit_hold,sale,done</attribute>
+            </xpath>
             <field name="state" position="before">
                 <button
                     name="action_force_delivery_state"
@@ -20,7 +33,7 @@
                 />
             </field>
             <group name="sale_shipping" position="inside">
-                <field name="delivery_status" invisible="state != 'sale'" />
+                <field name="delivery_status" invisible="state not in ('sale', 'credit_hold')" />
                 <field name="force_delivery_state" invisible="1" />
             </group>
             <xpath expr="//field[@name='order_line']/list" position="inside">

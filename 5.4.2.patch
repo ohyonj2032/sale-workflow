@@ -1,0 +1,502 @@
+diff --git a/sale_delivery_state/__manifest__.py b/sale_delivery_state/__manifest__.py
+index 5cd51c09..4d414ee4 100644
+--- a/sale_delivery_state/__manifest__.py
++++ b/sale_delivery_state/__manifest__.py
+@@ -5,14 +5,15 @@
+ {
+     "name": "Sale delivery State",
+     "summary": "Show the delivery state on the sale order",
+-    "version": "18.0.1.2.1",
++    "version": "18.0.1.3.0",
+     "category": "Product",
+     "website": "https://github.com/OCA/sale-workflow",
+     "author": "Akretion, Odoo Community Association (OCA)",
+     "license": "AGPL-3",
+     "installable": True,
+-    "depends": ["sale"],
++    "depends": ["account", "sale_stock"],
+     "data": [
++        "security/sale_delivery_state_security.xml",
+         "views/sale_order_views.xml",
+         "views/res_config_settings_views.xml",
+     ],
+diff --git a/sale_delivery_state/hooks.py b/sale_delivery_state/hooks.py
+index 85e19ba2..d74ff569 100644
+--- a/sale_delivery_state/hooks.py
++++ b/sale_delivery_state/hooks.py
+@@ -15,8 +15,12 @@ from odoo.tools.sql import column_exists, create_column
+ _logger = logging.getLogger(__name__)
+ 
+ 
++CREDIT_HOLD_CHUNK_SIZE = 2000
++
++
+ def pre_init_hook(env):
+     _setup_new_columns(env.cr)
++    _migrate_credit_hold_orders(env.cr)
+ 
+ 
+ def _setup_new_columns(cr):
+@@ -29,9 +33,52 @@ def _setup_new_columns(cr):
+         cr.execute("UPDATE sale_order_line SET skip_sale_delivery_state = False")
+ 
+ 
++def _migrate_credit_hold_orders(cr, chunk_size=CREDIT_HOLD_CHUNK_SIZE):
++    if not column_exists(cr, "res_partner", "credit") or not column_exists(
++        cr, "res_partner", "credit_limit"
++    ):
++        _logger.info("Skip credit hold migration because partner credit fields are missing")
++        return
++    total = 0
++    while True:
++        cr.execute(
++            """
++            WITH batch AS (
++                SELECT so.id
++                FROM sale_order so
++                JOIN res_partner partner ON partner.id = so.partner_id
++                JOIN res_partner commercial_partner
++                    ON commercial_partner.id = COALESCE(
++                        partner.commercial_partner_id, partner.id
++                    )
++                WHERE so.state = 'sale'
++                    AND COALESCE(commercial_partner.credit_limit, 0) > 0
++                    AND COALESCE(commercial_partner.credit, 0)
++                        + COALESCE(so.amount_total, 0)
++                        > COALESCE(commercial_partner.credit_limit, 0)
++                ORDER BY so.id
++                LIMIT %s
++                FOR UPDATE OF so SKIP LOCKED
++            )
++            UPDATE sale_order so
++            SET state = 'credit_hold'
++            FROM batch
++            WHERE so.id = batch.id
++            RETURNING so.id
++            """,
++            (chunk_size,),
++        )
++        moved_ids = [row[0] for row in cr.fetchall()]
++        if not moved_ids:
++            break
++        total += len(moved_ids)
++        _logger.info("Migrated %s sale orders to credit_hold", total)
++        cr.commit()
++    if total:
++        _logger.info("Completed credit hold migration for %s sale orders", total)
++
++
+ def post_init_hook(env):
+-    # Recompute '<sale.order>.delivery_status' by chunk to keep a constant
+-    # memory consumption
+     order_model = env["sale.order"].with_context(prefetch_fields=False)
+     rec_ids = order_model.search([]).ids
+     _logger.info("Recompute 'delivery_status' on %s sale orders...", len(rec_ids))
+diff --git a/sale_delivery_state/models/sale_order.py b/sale_delivery_state/models/sale_order.py
+index efce264f..1c5d2b3f 100644
+--- a/sale_delivery_state/models/sale_order.py
++++ b/sale_delivery_state/models/sale_order.py
+@@ -5,22 +5,22 @@
+ # Copyright 2023 Manuel Regidor <manuel.regidor@sygel.es>
+ # License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl).
+ 
+-from odoo import api, fields, models
++from odoo import _, api, fields, models
++from odoo.exceptions import AccessError, UserError
+ from odoo.tools import float_compare, float_is_zero
+ 
+ 
+ class SaleOrder(models.Model):
+     _inherit = "sale.order"
+ 
++    state = fields.Selection(
++        selection_add=[("credit_hold", "Credit Hold")],
++        ondelete={"credit_hold": "set default"},
++    )
++
+     delivery_status = fields.Selection(
+-        # Compute method have a different name then the field because
+-        # the method _compute_delivery_status already exist in odoo sale_stock
+         compute="_compute_oca_delivery_status",
+         store=True,
+-        # Respect the same order as in sale_stock
+-        # Including the 'started' state
+-        # that is not used here but we compute it
+-        # if pickings are available, to be compatible.
+         selection=[
+             ("pending", "Not Delivered"),
+             ("started", "Started"),
+@@ -37,15 +37,7 @@ class SaleOrder(models.Model):
+     )
+ 
+     def _all_qty_delivered(self):
+-        """
+-        Returns True if all line have qty_delivered >= to ordered quantities
+-
+-        If `delivery` module is installed, ignores the lines with delivery costs
+-
+-        :returns: boolean
+-        """
+         self.ensure_one()
+-        # Skip delivery costs lines
+         sale_lines = self.order_line.filtered(
+             lambda rec: not rec._is_delivery() and not rec.skip_sale_delivery_state
+         )
+@@ -61,13 +53,7 @@ class SaleOrder(models.Model):
+         )
+ 
+     def _partially_delivered(self):
+-        """
+-        Returns True if at least one line is delivered
+-
+-        :returns: boolean
+-        """
+         self.ensure_one()
+-        # Skip delivery costs lines
+         sale_lines = self.order_line.filtered(
+             lambda rec: not rec._is_delivery() and not rec.skip_sale_delivery_state
+         )
+@@ -99,16 +85,87 @@ class SaleOrder(models.Model):
+                 order.delivery_status = "pending"
+ 
+     def _is_delivery_status_started(self):
+-        # Loose dep on sale_stock. Feel free to customize this method
+-        # to add your own logic or to create sale_stock glue module.
+-        # NOTE: as the delivery_status is stored the update of a picking
+-        # won't have any effect here. Hence, if you really want to
+-        # fully support the started state, you should trigger the update
+-        # of the sale order when a picking is updated.
+-        # For now, we don't care that much as this state was not used before.
+         has_pickings = "picking_ids" in self._fields
+         return has_pickings and any(p.state == "done" for p in self.picking_ids)
+ 
++    def _get_credit_partner(self):
++        self.ensure_one()
++        return self.partner_id.commercial_partner_id
++
++    def _get_credit_limit_amount(self):
++        self.ensure_one()
++        partner = self._get_credit_partner()
++        if "credit_limit" not in partner._fields:
++            return 0.0
++        return partner.credit_limit or 0.0
++
++    def _get_credit_exposure_amount(self):
++        self.ensure_one()
++        partner = self._get_credit_partner()
++        if "credit" not in partner._fields:
++            return 0.0
++        return (partner.credit or 0.0) + self.amount_total
++
++    def _is_credit_hold_required(self):
++        self.ensure_one()
++        limit_amount = self._get_credit_limit_amount()
++        if not limit_amount:
++            return False
++        return float_compare(
++            self._get_credit_exposure_amount(),
++            limit_amount,
++            precision_rounding=self.currency_id.rounding,
++        ) > 0
++
++    def _action_confirm(self):
++        credit_hold_orders = self.filtered(lambda order: order._is_credit_hold_required())
++        res = super(
++            SaleOrder,
++            self.with_context(credit_hold_order_ids=credit_hold_orders.ids),
++        )._action_confirm()
++        if credit_hold_orders:
++            credit_hold_orders.with_context(allow_credit_release=True).write(
++                {"state": "credit_hold"}
++            )
++        return res
++
++    def _has_active_pickings(self):
++        self.ensure_one()
++        if "picking_ids" not in self._fields:
++            return False
++        return bool(self.picking_ids.filtered(lambda picking: picking.state != "cancel"))
++
++    def action_release_credit(self):
++        if not self.env.user.has_group("sale_delivery_state.group_sale_credit_manager"):
++            raise AccessError(
++                _("Only users in the Credit Manager group can release a credit hold.")
++            )
++        held_orders = self.filtered(lambda order: order.state == "credit_hold")
++        if not held_orders:
++            return True
++        held_orders.with_context(allow_credit_release=True).write({"state": "sale"})
++        held_orders.filtered(lambda order: not order._has_active_pickings()).order_line._action_launch_stock_rule()
++        return True
++
++    def write(self, vals):
++        if vals.get("state") == "sale":
++            held_orders = self.filtered(lambda order: order.state == "credit_hold")
++            if held_orders and not self.env.context.get("allow_credit_release"):
++                raise UserError(
++                    _(
++                        "Use the Release Credit action to move a frozen sales order back to Sale."
++                    )
++                )
++            if held_orders and not self.env.user.has_group(
++                "sale_delivery_state.group_sale_credit_manager"
++            ):
++                raise AccessError(
++                    _(
++                        "Only users in the Credit Manager group can release a credit hold."
++                    )
++                )
++        return super().write(vals)
++
+     def action_force_delivery_state(self):
+         self.write({"force_delivery_state": True})
+ 
+diff --git a/sale_delivery_state/models/sale_order_line.py b/sale_delivery_state/models/sale_order_line.py
+index b3ff1fbc..8e9531a2 100644
+--- a/sale_delivery_state/models/sale_order_line.py
++++ b/sale_delivery_state/models/sale_order_line.py
+@@ -25,3 +25,12 @@ class SaleOrderLine(models.Model):
+             ):
+                 skip_sale_delivery_state = True
+             line.skip_sale_delivery_state = skip_sale_delivery_state
++
++    def _action_launch_stock_rule(self, previous_product_uom_qty=False):
++        credit_hold_order_ids = set(self.env.context.get("credit_hold_order_ids") or [])
++        lines = self.filtered(lambda line: line.order_id.id not in credit_hold_order_ids)
++        if not lines:
++            return True
++        return super(SaleOrderLine, lines)._action_launch_stock_rule(
++            previous_product_uom_qty=previous_product_uom_qty
++        )
+diff --git a/sale_delivery_state/tests/test_delivery_state.py b/sale_delivery_state/tests/test_delivery_state.py
+index e1d424a4..ed685780 100644
+--- a/sale_delivery_state/tests/test_delivery_state.py
++++ b/sale_delivery_state/tests/test_delivery_state.py
+@@ -5,14 +5,20 @@
+ 
+ from unittest import mock
+ 
+-from odoo.tests.common import TransactionCase
++from odoo.exceptions import AccessError, UserError
++from odoo.fields import Command
++from odoo.tests.common import TransactionCase, new_test_user, tagged
+ 
++from odoo.addons.sale_delivery_state.hooks import pre_init_hook
+ 
++
++@tagged("post_install", "-at_install")
+ class TestDeliveryState(TransactionCase):
+     @classmethod
+     def setUpClass(cls):
+         super().setUpClass()
+         cls.env = cls.env(context=dict(cls.env.context, tracking_disable=True))
++        cls.company = cls.env.company
+         cls.order = cls.env.ref("sale_delivery_state.sale_order_1")
+         cls.delivery_cost = cls.env["product.product"].create(
+             {"name": "delivery", "type": "service"}
+@@ -20,6 +26,38 @@ class TestDeliveryState(TransactionCase):
+         cls.service_product = cls.env["product.product"].create(
+             {"name": "service", "type": "service"}
+         )
++        cls.credit_product = cls.env["product.product"].create(
++            {
++                "name": "Credit Controlled Product",
++                "type": "consu",
++                "is_storable": True,
++                "uom_id": cls.env.ref("uom.product_uom_unit").id,
++                "uom_po_id": cls.env.ref("uom.product_uom_unit").id,
++                "list_price": 60.0,
++            }
++        )
++        cls.stock_location = cls.env.ref("stock.stock_location_stock")
++        cls.env["stock.quant"]._update_available_quantity(
++            cls.credit_product, cls.stock_location, 1000
++        )
++        cls.sales_user = new_test_user(
++            cls.env,
++            "credit_hold_sales_user",
++            "sales_team.group_sale_salesman,stock.group_stock_user",
++            company_id=cls.company.id,
++            company_ids=[Command.set(cls.company.ids)],
++        )
++        cls.credit_manager = new_test_user(
++            cls.env,
++            "credit_hold_manager",
++            (
++                "sales_team.group_sale_manager,"
++                "stock.group_stock_user,"
++                "sale_delivery_state.group_sale_credit_manager"
++            ),
++            company_id=cls.company.id,
++            company_ids=[Command.set(cls.company.ids)],
++        )
+ 
+     def _mock_delivery(self, delivery_prod=None):
+         delivery_prod = delivery_prod or self.delivery_cost
+@@ -54,6 +92,43 @@ class TestDeliveryState(TransactionCase):
+             }
+         )
+ 
++    def _set_partner_credit(self, partner, amount):
++        self.env.flush_all()
++        self.env.cr.execute(
++            "UPDATE res_partner SET credit = %s WHERE id = %s",
++            (amount, partner.commercial_partner_id.id),
++        )
++        self.env.invalidate_all()
++
++    def _create_credit_sale_order(self, partner, user=None, price_unit=60.0):
++        user = user or self.env.user
++        return (
++            self.env["sale.order"]
++            .with_user(user)
++            .create(
++                {
++                    "partner_id": partner.id,
++                    "partner_invoice_id": partner.id,
++                    "partner_shipping_id": partner.id,
++                    "user_id": user.id,
++                    "company_id": self.company.id,
++                    "order_line": [
++                        (
++                            0,
++                            0,
++                            {
++                                "name": self.credit_product.name,
++                                "product_id": self.credit_product.id,
++                                "product_uom_qty": 1,
++                                "product_uom": self.credit_product.uom_id.id,
++                                "price_unit": price_unit,
++                            },
++                        )
++                    ],
++                }
++            )
++        )
++
+     def test_no_delivery(self):
+         self.assertFalse(self.order.delivery_status)
+ 
+@@ -120,3 +195,89 @@ class TestDeliveryState(TransactionCase):
+             lambda a: a.product_id and a.product_id == self.service_product
+         ).write({"skip_sale_delivery_state": True})
+         self.assertEqual(self.order.delivery_status, "full")
++
++    def test_credit_hold_confirmation_and_release(self):
++        partner = self.env["res.partner"].create(
++            {"name": "Credit Hold Partner", "credit_limit": 100.0}
++        )
++        self._set_partner_credit(partner, 60.0)
++        order = self._create_credit_sale_order(
++            partner, user=self.credit_manager, price_unit=50.0
++        )
++
++        order.action_confirm()
++
++        self.assertEqual(order.state, "credit_hold")
++        self.assertFalse(order.picking_ids)
++        self.assertTrue(order.procurement_group_id)
++
++        order.with_user(self.credit_manager).action_release_credit()
++
++        self.assertEqual(order.state, "sale")
++        self.assertEqual(len(order.picking_ids), 1)
++        picking = order.picking_ids
++        self.assertEqual(picking.sale_id, order)
++        self.assertEqual(picking.group_id, order.procurement_group_id)
++        self.assertEqual(picking.move_ids.sale_line_id.order_id, order)
++
++    def test_credit_hold_write_requires_context_and_group(self):
++        partner = self.env["res.partner"].create(
++            {"name": "Credit Hold Protected Partner", "credit_limit": 100.0}
++        )
++        self._set_partner_credit(partner, 80.0)
++        order = self._create_credit_sale_order(
++            partner, user=self.sales_user, price_unit=30.0
++        )
++
++        order.with_user(self.sales_user).action_confirm()
++        self.assertEqual(order.state, "credit_hold")
++
++        with self.assertRaises(UserError):
++            order.with_user(self.credit_manager).write({"state": "sale"})
++        with self.assertRaises(UserError):
++            order.with_user(self.sales_user).write({"state": "sale"})
++        with self.assertRaises(AccessError):
++            order.with_user(self.sales_user).with_context(allow_credit_release=True).write(
++                {"state": "sale"}
++            )
++
++        order.with_user(self.credit_manager).action_release_credit()
++        self.assertEqual(order.state, "sale")
++
++    def test_pre_init_hook_migrates_historical_sale_orders(self):
++        partner = self.env["res.partner"].create(
++            {"name": "Historical Credit Hold Partner", "credit_limit": 100.0}
++        )
++        safe_partner = self.env["res.partner"].create(
++            {"name": "Historical Safe Partner", "credit_limit": 200.0}
++        )
++        self._set_partner_credit(partner, 0.0)
++        self._set_partner_credit(safe_partner, 0.0)
++        migrated_order = self._create_credit_sale_order(
++            partner, user=self.credit_manager, price_unit=30.0
++        )
++        safe_order = self._create_credit_sale_order(
++            safe_partner, user=self.credit_manager, price_unit=30.0
++        )
++
++        migrated_order.action_confirm()
++        safe_order.action_confirm()
++        self.assertEqual(migrated_order.state, "sale")
++        self.assertEqual(safe_order.state, "sale")
++        self.assertTrue(migrated_order.picking_ids)
++        self.assertTrue(safe_order.picking_ids)
++
++        self._set_partner_credit(partner, 80.0)
++        self._set_partner_credit(safe_partner, 50.0)
++
++        pre_init_hook(self.env)
++        migrated_order.invalidate_recordset(["state"])
++        safe_order.invalidate_recordset(["state"])
++
++        self.assertEqual(migrated_order.state, "credit_hold")
++        self.assertEqual(safe_order.state, "sale")
++
++        existing_picking = migrated_order.picking_ids
++        migrated_order.with_user(self.credit_manager).action_release_credit()
++        self.assertEqual(migrated_order.state, "sale")
++        self.assertEqual(migrated_order.picking_ids, existing_picking)
+diff --git a/sale_delivery_state/views/sale_order_views.xml b/sale_delivery_state/views/sale_order_views.xml
+index 0854dd28..2b772ef7 100644
+--- a/sale_delivery_state/views/sale_order_views.xml
++++ b/sale_delivery_state/views/sale_order_views.xml
+@@ -5,6 +5,19 @@
+         <field name="model">sale.order</field>
+         <field name="inherit_id" ref="sale.view_order_form" />
+         <field name="arch" type="xml">
++            <xpath expr="//header/button[@name='action_quotation_send']" position="before">
++                <button
++                    name="action_release_credit"
++                    type="object"
++                    string="Release Credit"
++                    class="btn-primary"
++                    groups="sale_delivery_state.group_sale_credit_manager"
++                    invisible="state != 'credit_hold'"
++                />
++            </xpath>
++            <xpath expr="//field[@name='state']" position="attributes">
++                <attribute name="statusbar_visible">draft,sent,credit_hold,sale,done</attribute>
++            </xpath>
+             <field name="state" position="before">
+                 <button
+                     name="action_force_delivery_state"
+@@ -20,7 +33,7 @@
+                 />
+             </field>
+             <group name="sale_shipping" position="inside">
+-                <field name="delivery_status" invisible="state != 'sale'" />
++                <field name="delivery_status" invisible="state not in ('sale', 'credit_hold')" />
+                 <field name="force_delivery_state" invisible="1" />
+             </group>
+             <xpath expr="//field[@name='order_line']/list" position="inside">

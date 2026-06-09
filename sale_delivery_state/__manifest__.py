@@ -5,14 +5,15 @@
 {
     "name": "Sale delivery State",
     "summary": "Show the delivery state on the sale order",
-    "version": "18.0.1.2.1",
+    "version": "18.0.1.3.0",
     "category": "Product",
     "website": "https://github.com/OCA/sale-workflow",
     "author": "Akretion, Odoo Community Association (OCA)",
     "license": "AGPL-3",
     "installable": True,
-    "depends": ["sale"],
+    "depends": ["account", "sale_stock"],
     "data": [
+        "security/sale_delivery_state_security.xml",
         "views/sale_order_views.xml",
         "views/res_config_settings_views.xml",
     ],

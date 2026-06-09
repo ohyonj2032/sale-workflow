@@ -25,3 +25,12 @@ class SaleOrderLine(models.Model):
             ):
                 skip_sale_delivery_state = True
             line.skip_sale_delivery_state = skip_sale_delivery_state
+
+    def _action_launch_stock_rule(self, previous_product_uom_qty=False):
+        credit_hold_order_ids = set(self.env.context.get("credit_hold_order_ids") or [])
+        lines = self.filtered(lambda line: line.order_id.id not in credit_hold_order_ids)
+        if not lines:
+            return True
+        return super(SaleOrderLine, lines)._action_launch_stock_rule(
+            previous_product_uom_qty=previous_product_uom_qty
+        )
