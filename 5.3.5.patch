@@ -1,0 +1,456 @@
+diff --git a/sale_delivery_state/__manifest__.py b/sale_delivery_state/__manifest__.py
+index 5cd51c09..278474f9 100644
+--- a/sale_delivery_state/__manifest__.py
++++ b/sale_delivery_state/__manifest__.py
+@@ -5,13 +5,16 @@
+ {
+     "name": "Sale delivery State",
+     "summary": "Show the delivery state on the sale order",
+-    "version": "18.0.1.2.1",
+-    "category": "Product",
++    "version": "18.0.2.0.0",
++    "category": "Sales",
+     "website": "https://github.com/OCA/sale-workflow",
+     "author": "Akretion, Odoo Community Association (OCA)",
+     "license": "AGPL-3",
+     "installable": True,
+-    "depends": ["sale"],
++    "depends": [
++        "sale",
++        "sale_stock",
++    ],
+     "data": [
+         "views/sale_order_views.xml",
+         "views/res_config_settings_views.xml",
+diff --git a/sale_delivery_state/i18n/es.po b/sale_delivery_state/i18n/es.po
+index 12fef735..f9f23c9d 100644
+--- a/sale_delivery_state/i18n/es.po
++++ b/sale_delivery_state/i18n/es.po
+@@ -23,8 +23,8 @@ msgid ""
+ "Allow to enforce done state of delivery, for instance if some quantities "
+ "were cancelled"
+ msgstr ""
+-"Permitir forzar estado de entrega a hecho, por ejemplo si se han cancelado "
+-"algunas cantidades"
++"Permite forzar el estado de entrega a realizado, por ejemplo si se han "
++"cancelado algunas cantidades"
+ 
+ #. module: sale_delivery_state
+ #: model:ir.model.fields,help:sale_delivery_state.field_sale_order__delivery_status
+@@ -45,28 +45,28 @@ msgstr "Empresas"
+ #. module: sale_delivery_state
+ #: model:ir.model,name:sale_delivery_state.model_res_config_settings
+ msgid "Config Settings"
+-msgstr "Configuración"
++msgstr "Ajustes de configuración"
+ 
+ #. module: sale_delivery_state
+ #: model:ir.model.fields,field_description:sale_delivery_state.field_sale_order__delivery_status
+ #: model_terms:ir.ui.view,arch_db:sale_delivery_state.sale_order_view_search_inherit_sale_inherit_delivery_status
+ msgid "Delivery Status"
+-msgstr "Estado de la Entrega"
++msgstr "Estado de entrega"
+ 
+ #. module: sale_delivery_state
+ #: model:ir.model.fields,field_description:sale_delivery_state.field_sale_order__force_delivery_state
+ msgid "Force Delivery State"
+-msgstr "Forzar estado de envío"
++msgstr "Forzar estado de entrega"
+ 
+ #. module: sale_delivery_state
+ #: model_terms:ir.ui.view,arch_db:sale_delivery_state.view_order_form_inherit_delivery_state
+ msgid "Force delivery done"
+-msgstr "Forzar envío realizado"
++msgstr "Forzar entrega realizada"
+ 
+ #. module: sale_delivery_state
+ #: model:ir.model.fields.selection,name:sale_delivery_state.selection__sale_order__delivery_status__full
+ msgid "Fully Delivered"
+-msgstr "Totalmente Entregado"
++msgstr "Totalmente entregado"
+ 
+ #. module: sale_delivery_state
+ #: model_terms:ir.ui.view,arch_db:sale_delivery_state.sale_delivery_state_res_config_settings_view_form
+@@ -74,19 +74,18 @@ msgid ""
+ "If active, sale order lines containing Service products will not be "
+ "evaluated by default when determining the Delivery State."
+ msgstr ""
+-"Si está activo, las líneas de pedido de venta que contienen productos de "
+-"tipo Servicio no se evaluarán de forma predeterminada al determinar el "
+-"Estado de entrega."
++"Si está activo, las líneas de pedido de venta con productos de tipo Servicio "
++"no se evaluarán por defecto al determinar el estado de entrega."
+ 
+ #. module: sale_delivery_state
+ #: model:ir.model.fields.selection,name:sale_delivery_state.selection__sale_order__delivery_status__pending
+ msgid "Not Delivered"
+-msgstr "No Entregado"
++msgstr "No entregado"
+ 
+ #. module: sale_delivery_state
+ #: model:ir.model.fields.selection,name:sale_delivery_state.selection__sale_order__delivery_status__partial
+ msgid "Partially Delivered"
+-msgstr "Entregado parcialmente"
++msgstr "Parcialmente entregado"
+ 
+ #. module: sale_delivery_state
+ #: model_terms:ir.ui.view,arch_db:sale_delivery_state.sale_order_view_search_inherit_sale_inherit_delivery_status
+@@ -112,23 +111,9 @@ msgstr "Omitir estado de entrega"
+ #: model:ir.model.fields,field_description:sale_delivery_state.field_res_company__skip_service_sale_delivery_state
+ #: model:ir.model.fields,field_description:sale_delivery_state.field_res_config_settings__skip_service_sale_delivery_state
+ msgid "Skip Service products for Sale Delivery State"
+-msgstr "Omitir productos de tipo Servicio para el Estado de entrega de venta"
+-
+-#. module: sale_delivery_state
+-#: model:ir.model.fields.selection,name:sale_delivery_state.selection__sale_order__delivery_status__started
+-msgid "Started"
+-msgstr "Iniciado"
++msgstr "Omitir productos de servicio para el estado de entrega de venta"
+ 
+ #. module: sale_delivery_state
+ #: model_terms:ir.ui.view,arch_db:sale_delivery_state.view_order_form_inherit_delivery_state
+ msgid "Unforce delivery done"
+-msgstr "No forzar envío realizado"
+-
+-#~ msgid ""
+-#~ "Red: Late\n"
+-#~ "            Orange: To process today\n"
+-#~ "            Green: On time"
+-#~ msgstr ""
+-#~ "Rojo: retrasado\n"
+-#~ "            Naranja: a procesar hoy\n"
+-#~ "            Verde: a tiempo"
++msgstr "No forzar entrega realizada"
+diff --git a/sale_delivery_state/i18n/it.po b/sale_delivery_state/i18n/it.po
+index 06a30b4d..1488947b 100644
+--- a/sale_delivery_state/i18n/it.po
++++ b/sale_delivery_state/i18n/it.po
+@@ -66,7 +66,7 @@ msgstr "Forza la consegna ad evasa"
+ #. module: sale_delivery_state
+ #: model:ir.model.fields.selection,name:sale_delivery_state.selection__sale_order__delivery_status__full
+ msgid "Fully Delivered"
+-msgstr "Consegnata comletamente"
++msgstr "Consegnato completamente"
+ 
+ #. module: sale_delivery_state
+ #: model_terms:ir.ui.view,arch_db:sale_delivery_state.sale_delivery_state_res_config_settings_view_form
+@@ -80,12 +80,12 @@ msgstr ""
+ #. module: sale_delivery_state
+ #: model:ir.model.fields.selection,name:sale_delivery_state.selection__sale_order__delivery_status__pending
+ msgid "Not Delivered"
+-msgstr "Non consegnata"
++msgstr "Non consegnato"
+ 
+ #. module: sale_delivery_state
+ #: model:ir.model.fields.selection,name:sale_delivery_state.selection__sale_order__delivery_status__partial
+ msgid "Partially Delivered"
+-msgstr "Consegnata parzialmente"
++msgstr "Consegnato parzialmente"
+ 
+ #. module: sale_delivery_state
+ #: model_terms:ir.ui.view,arch_db:sale_delivery_state.sale_order_view_search_inherit_sale_inherit_delivery_status
+@@ -113,21 +113,7 @@ msgstr "Ignora stato di consegna"
+ msgid "Skip Service products for Sale Delivery State"
+ msgstr "Ignora i prodotti servizio per lo stato di consegna nelle vendite"
+ 
+-#. module: sale_delivery_state
+-#: model:ir.model.fields.selection,name:sale_delivery_state.selection__sale_order__delivery_status__started
+-msgid "Started"
+-msgstr "Iniziata"
+-
+ #. module: sale_delivery_state
+ #: model_terms:ir.ui.view,arch_db:sale_delivery_state.view_order_form_inherit_delivery_state
+ msgid "Unforce delivery done"
+ msgstr "Annulla consegna evasa forzata"
+-
+-#~ msgid ""
+-#~ "Red: Late\n"
+-#~ "            Orange: To process today\n"
+-#~ "            Green: On time"
+-#~ msgstr ""
+-#~ "Rosso: in ritardo\n"
+-#~ "            Arancione: da elaborare oggi\n"
+-#~ "            Verde: in tempo"
+diff --git a/sale_delivery_state/i18n/sale_delivery_state.pot b/sale_delivery_state/i18n/sale_delivery_state.pot
+index 077b8ee4..1fb2a140 100644
+--- a/sale_delivery_state/i18n/sale_delivery_state.pot
++++ b/sale_delivery_state/i18n/sale_delivery_state.pot
+@@ -38,6 +38,11 @@ msgstr ""
+ msgid "Config Settings"
+ msgstr ""
+ 
++#. module: sale_delivery_state
++#: model_terms:ir.ui.view,arch_db:sale_delivery_state.view_order_form_inherit_delivery_state
++msgid "Deliver"
++msgstr ""
++
+ #. module: sale_delivery_state
+ #: model:ir.model.fields,field_description:sale_delivery_state.field_sale_order__delivery_status
+ #: model_terms:ir.ui.view,arch_db:sale_delivery_state.sale_order_view_search_inherit_sale_inherit_delivery_status
+@@ -103,11 +108,11 @@ msgid "Skip Service products for Sale Delivery State"
+ msgstr ""
+ 
+ #. module: sale_delivery_state
+-#: model:ir.model.fields.selection,name:sale_delivery_state.selection__sale_order__delivery_status__started
+-msgid "Started"
++#: model_terms:ir.ui.view,arch_db:sale_delivery_state.view_order_form_inherit_delivery_state
++msgid "Unforce delivery done"
+ msgstr ""
+ 
+ #. module: sale_delivery_state
+-#: model_terms:ir.ui.view,arch_db:sale_delivery_state.view_order_form_inherit_delivery_state
+-msgid "Unforce delivery done"
++#: model_terms:ir.ui.view,arch_db:sale_delivery_state.sale_order_view_search_inherit_sale_inherit_delivery_status
++msgid "Fully Delivered"
+ msgstr ""
+diff --git a/sale_delivery_state/models/sale_order.py b/sale_delivery_state/models/sale_order.py
+index efce264f..1608f423 100644
+--- a/sale_delivery_state/models/sale_order.py
++++ b/sale_delivery_state/models/sale_order.py
+@@ -13,20 +13,15 @@ class SaleOrder(models.Model):
+     _inherit = "sale.order"
+ 
+     delivery_status = fields.Selection(
+-        # Compute method have a different name then the field because
+-        # the method _compute_delivery_status already exist in odoo sale_stock
+         compute="_compute_oca_delivery_status",
+         store=True,
+-        # Respect the same order as in sale_stock
+-        # Including the 'started' state
+-        # that is not used here but we compute it
+-        # if pickings are available, to be compatible.
+         selection=[
+             ("pending", "Not Delivered"),
+-            ("started", "Started"),
+             ("partial", "Partially Delivered"),
+             ("full", "Fully Delivered"),
+         ],
++        default="pending",
++        tracking=True,
+     )
+ 
+     force_delivery_state = fields.Boolean(
+@@ -45,7 +40,6 @@ class SaleOrder(models.Model):
+         :returns: boolean
+         """
+         self.ensure_one()
+-        # Skip delivery costs lines
+         sale_lines = self.order_line.filtered(
+             lambda rec: not rec._is_delivery() and not rec.skip_sale_delivery_state
+         )
+@@ -67,7 +61,6 @@ class SaleOrder(models.Model):
+         :returns: boolean
+         """
+         self.ensure_one()
+-        # Skip delivery costs lines
+         sale_lines = self.order_line.filtered(
+             lambda rec: not rec._is_delivery() and not rec.skip_sale_delivery_state
+         )
+@@ -87,30 +80,36 @@ class SaleOrder(models.Model):
+     )
+     def _compute_oca_delivery_status(self):
+         for order in self:
+-            if order.state in ("draft", "cancel"):
+-                order.delivery_status = None
++            if order.state in ("draft", "sent", "cancel"):
++                order.delivery_status = "pending"
+             elif order.force_delivery_state or order._all_qty_delivered():
+                 order.delivery_status = "full"
+             elif order._partially_delivered():
+                 order.delivery_status = "partial"
+-            elif order._is_delivery_status_started():
+-                order.delivery_status = "started"
+             else:
+                 order.delivery_status = "pending"
+ 
+-    def _is_delivery_status_started(self):
+-        # Loose dep on sale_stock. Feel free to customize this method
+-        # to add your own logic or to create sale_stock glue module.
+-        # NOTE: as the delivery_status is stored the update of a picking
+-        # won't have any effect here. Hence, if you really want to
+-        # fully support the started state, you should trigger the update
+-        # of the sale order when a picking is updated.
+-        # For now, we don't care that much as this state was not used before.
+-        has_pickings = "picking_ids" in self._fields
+-        return has_pickings and any(p.state == "done" for p in self.picking_ids)
++    def action_confirm(self):
++        res = super().action_confirm()
++        for order in self:
++            order._compute_oca_delivery_status()
++        return res
++
++    def action_deliver(self):
++        self.ensure_one()
++        if self.state != "sale":
++            return
++        for line in self.order_line.filtered(
++            lambda l: not l._is_delivery() and not l.skip_sale_delivery_state
++        ):
++            if line.product_uom_qty > line.qty_delivered:
++                line.qty_delivered = line.product_uom_qty
++        self._compute_oca_delivery_status()
+ 
+     def action_force_delivery_state(self):
+         self.write({"force_delivery_state": True})
++        self._compute_oca_delivery_status()
+ 
+     def action_unforce_delivery_state(self):
+         self.write({"force_delivery_state": False})
++        self._compute_oca_delivery_status()
+diff --git a/sale_delivery_state/tests/test_delivery_state.py b/sale_delivery_state/tests/test_delivery_state.py
+index e1d424a4..03cb0e12 100644
+--- a/sale_delivery_state/tests/test_delivery_state.py
++++ b/sale_delivery_state/tests/test_delivery_state.py
+@@ -5,7 +5,7 @@
+ 
+ from unittest import mock
+ 
+-from odoo.tests.common import TransactionCase
++from odoo.tests.common import TransactionCase, tagged
+ 
+ 
+ class TestDeliveryState(TransactionCase):
+@@ -120,3 +120,96 @@ class TestDeliveryState(TransactionCase):
+             lambda a: a.product_id and a.product_id == self.service_product
+         ).write({"skip_sale_delivery_state": True})
+         self.assertEqual(self.order.delivery_status, "full")
++
++    def test_partial_delivery_state_transition(self):
++        self.order.action_confirm()
++        self.assertEqual(self.order.delivery_status, "pending")
++        first_line = self.order.order_line[0]
++        first_line.qty_delivered = first_line.product_uom_qty / 2
++        self.assertEqual(self.order.delivery_status, "partial")
++        for line in self.order.order_line:
++            line.qty_delivered = line.product_uom_qty
++        self.assertEqual(self.order.delivery_status, "full")
++
++    def test_partial_delivery_with_multiple_lines(self):
++        self.order.action_confirm()
++        line_count = len(self.order.order_line)
++        self.assertEqual(self.order.delivery_status, "pending")
++        first_line = self.order.order_line[0]
++        first_line.qty_delivered = first_line.product_uom_qty
++        self.assertEqual(self.order.delivery_status, "partial")
++        for line in self.order.order_line - first_line:
++            line.qty_delivered = line.product_uom_qty
++        self.assertEqual(self.order.delivery_status, "full")
++
++    def test_action_deliver_method(self):
++        self.order.action_confirm()
++        self.assertEqual(self.order.delivery_status, "pending")
++        self.order.action_deliver()
++        self.assertEqual(self.order.delivery_status, "full")
++
++    def test_action_deliver_not_confirmed(self):
++        self.order.action_deliver()
++        self.assertEqual(self.order.delivery_status, "pending")
++
++    def test_force_and_unforce_delivery_state(self):
++        self.order.action_confirm()
++        self.order.order_line[0].qty_delivered = 2
++        self.assertEqual(self.order.delivery_status, "partial")
++        self.order.action_force_delivery_state()
++        self.assertEqual(self.order.delivery_status, "full")
++        self.assertTrue(self.order.force_delivery_state)
++        self.order.action_unforce_delivery_state()
++        self.assertEqual(self.order.delivery_status, "partial")
++        self.assertFalse(self.order.force_delivery_state)
++
++    def test_cancel_order_resets_delivery_status(self):
++        self.order.action_confirm()
++        self.order.order_line[0].qty_delivered = 2
++        self.assertEqual(self.order.delivery_status, "partial")
++        self.order.action_cancel()
++        self.assertEqual(self.order.delivery_status, "pending")
++
++    def test_draft_order_delivery_status(self):
++        self.assertEqual(self.order.state, "draft")
++        self.assertEqual(self.order.delivery_status, "pending")
++
++    def test_sent_order_delivery_status(self):
++        self.order.action_quotation_sent()
++        self.assertEqual(self.order.delivery_status, "pending")
++
++    def test_cross_module_sale_stock_interaction(self):
++        self.order.action_confirm()
++        self.assertTrue(hasattr(self.order, "picking_ids"))
++        self.assertEqual(self.order.delivery_status, "pending")
++        first_line = self.order.order_line[0]
++        first_line.qty_delivered = first_line.product_uom_qty / 2
++        self.assertEqual(self.order.delivery_status, "partial")
++        for line in self.order.order_line:
++            line.qty_delivered = line.product_uom_qty
++        self.assertEqual(self.order.delivery_status, "full")
++
++    def test_partial_delivery_skip_delivery_costs(self):
++        self._add_delivery_cost_line()
++        with self._mock_delivery():
++            self.order.action_confirm()
++            self.assertEqual(self.order.delivery_status, "pending")
++            product_lines = self.order.order_line.filtered(
++                lambda l: not l._is_delivery()
++            )
++            first_product_line = product_lines[0]
++            first_product_line.qty_delivered = first_product_line.product_uom_qty / 2
++            self.assertEqual(self.order.delivery_status, "partial")
++            for line in product_lines:
++                line.qty_delivered = line.product_uom_qty
++            self.assertEqual(self.order.delivery_status, "full")
++
++    def test_partial_to_full_with_force_flag(self):
++        self.order.action_confirm()
++        self.order.order_line[0].qty_delivered = 1
++        self.assertEqual(self.order.delivery_status, "partial")
++        self.order.force_delivery_state = True
++        self.assertEqual(self.order.delivery_status, "full")
++        self.order.force_delivery_state = False
++        self.order.order_line[0].qty_delivered = 0
++        self.assertEqual(self.order.delivery_status, "pending")
+diff --git a/sale_delivery_state/views/sale_order_views.xml b/sale_delivery_state/views/sale_order_views.xml
+index 0854dd28..9ec732b3 100644
+--- a/sale_delivery_state/views/sale_order_views.xml
++++ b/sale_delivery_state/views/sale_order_views.xml
+@@ -18,9 +18,15 @@
+                     string="Unforce delivery done"
+                     invisible="not force_delivery_state or state != 'sale' or not locked"
+                 />
++                <button
++                    name="action_deliver"
++                    type="object"
++                    string="Deliver"
++                    invisible="state != 'sale' or delivery_status == 'full'"
++                />
+             </field>
+             <group name="sale_shipping" position="inside">
+-                <field name="delivery_status" invisible="state != 'sale'" />
++                <field name="delivery_status" invisible="state not in ('sale', 'done')" />
+                 <field name="force_delivery_state" invisible="1" />
+             </group>
+             <xpath expr="//field[@name='order_line']/list" position="inside">
+@@ -38,9 +44,9 @@
+                 <field
+                     name="delivery_status"
+                     widget="badge"
+-                    optional="hide"
++                    optional="show"
+                     decoration-info="delivery_status == 'pending'"
+-                    decoration-warning="delivery_status in ('partial', 'started')"
++                    decoration-warning="delivery_status == 'partial'"
+                     decoration-success="delivery_status == 'full'"
+                 />
+             </field>
+@@ -60,7 +66,12 @@
+                 <filter
+                     string="Pending Deliveries"
+                     name="filter_delivery_status_pending"
+-                    domain="[('delivery_status','in',['pending', 'started', 'partial'])]"
++                    domain="[('delivery_status','in',['pending', 'partial'])]"
++                />
++                <filter
++                    string="Fully Delivered"
++                    name="filter_delivery_status_full"
++                    domain="[('delivery_status','=','full')]"
+                 />
+             </filter>
+             <filter name="order_month" position="after">
