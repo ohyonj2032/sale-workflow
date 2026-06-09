@@ -1,6 +1,4 @@
 <?xml version="1.0" encoding="utf-8" ?>
-<!-- Copyright 2019 Akretion
-    License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl). -->
 <odoo>
     <record id="sale_order_view_form" model="ir.ui.view">
         <field name="model">sale.order</field>
@@ -8,6 +6,13 @@
         <field name="arch" type="xml">
             <xpath expr="//header" position="after">
                 <header name="substate">
+                    <field name="delivery_status" invisible="1" />
+                    <button
+                        name="action_deliver"
+                        type="object"
+                        string="Update Delivery Substate"
+                        invisible="state != 'sale' or delivery_status not in ('started', 'partial', 'full')"
+                    />
                     <field
                         name="substate_id"
                         widget="statusbar"

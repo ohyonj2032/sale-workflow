@@ -5,64 +5,70 @@ from odoo.exceptions import ValidationError
 from odoo.tests.common import TransactionCase
 
 
-class TestBaseSubstate(TransactionCase):
-    def setUp(self):
-        super().setUp()
-        self.substate_test_sale = self.env["sale.order"]
-        self.substate_test_sale_line = self.env["sale.order.line"]
+class TestSaleSubstate(TransactionCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.order_model = cls.env["sale.order"]
+        cls.partner = cls.env.ref("base.res_partner_1")
+        cls.product = cls.env.ref("product.product_product_25")
+        cls.substate_under_nego = cls.env.ref("sale_substate.base_substate_under_nego")
+        cls.substate_valid_docs = cls.env.ref("sale_substate.base_substate_valid_docs")
+        cls.substate_in_delivery = cls.env.ref("sale_substate.base_substate_in_delivery")
+        cls.substate_delivered = cls.env.ref("sale_substate.base_substate_delivered")
 
-        self.substate_under_nego = self.env.ref(
-            "sale_substate.base_substate_under_nego"
-        )
-        self.substate_won = self.env.ref("sale_substate.base_substate_won")
-        self.substate_wait_docs = self.env.ref("sale_substate.base_substate_wait_docs")
-        self.substate_valid_docs = self.env.ref(
-            "sale_substate.base_substate_valid_docs"
-        )
-        self.substate_in_delivery = self.env.ref(
-            "sale_substate.base_substate_in_delivery"
-        )
-        self.product_1 = self.env["product.product"].create(
+    @classmethod
+    def _create_sale_order(cls):
+        return cls.order_model.create(
             {
-                "name": "Test Product 1",
-                "type": "service",
-            }
-        )
-
-    def test_sale_order_substate(self):
-        partner = self.env.ref("base.res_partner_1")
-        so_test1 = self.substate_test_sale.create(
-            {
-                "name": "Test base substate to basic sale",
-                "partner_id": partner.id,
+                "name": "Test sale substate workflow",
+                "partner_id": cls.partner.id,
                 "order_line": [
                     (
                         0,
                         0,
                         {
-                            "product_id": self.product_1.id,
+                            "product_id": cls.product.id,
                             "product_uom_qty": 2,
-                            "product_uom": self.product_1.uom_id.id,
-                            "name": "line test",
+                            "product_uom": cls.product.uom_id.id,
+                            "name": cls.product.display_name,
                             "price_unit": 120.0,
                         },
                     )
                 ],
             }
         )
-        self.assertTrue(so_test1.state == "draft")
-        self.assertTrue(so_test1.substate_id == self.substate_under_nego)
 
-        # Block substate not corresponding to draft state
+    def test_sale_order_substate(self):
+        order = self._create_sale_order()
+
+        self.assertEqual(order.state, "draft")
+        self.assertEqual(order.substate_id, self.substate_under_nego)
+
         with self.assertRaises(ValidationError):
-            so_test1.substate_id = self.substate_valid_docs
-        # Test that validation of sale order change substate_id
-        so_test1.action_confirm()
-        self.assertTrue(so_test1.state == "sale")
-        self.assertTrue(so_test1.substate_id == self.substate_valid_docs)
+            order.substate_id = self.substate_valid_docs
 
-        # Test that substate_id is set to false if
-        # there is not substate corresponding to state
-        so_test1._action_cancel()
-        self.assertTrue(so_test1.state == "cancel")
-        self.assertTrue(not so_test1.substate_id)
+        order.action_confirm()
+        self.assertEqual(order.state, "sale")
+        self.assertEqual(order.substate_id, self.substate_valid_docs)
+
+        order._action_cancel()
+        self.assertEqual(order.state, "cancel")
+        self.assertFalse(order.substate_id)
+
+    def test_delivery_substate_flow(self):
+        order = self._create_sale_order()
+
+        order.action_confirm()
+        self.assertEqual(order.delivery_status, "pending")
+        self.assertEqual(order.substate_id, self.substate_valid_docs)
+
+        order.order_line.qty_delivered = 1.0
+        order.action_deliver()
+        self.assertEqual(order.delivery_status, "partial")
+        self.assertEqual(order.substate_id, self.substate_in_delivery)
+
+        order.order_line.qty_delivered = order.order_line.product_uom_qty
+        order.action_deliver()
+        self.assertEqual(order.delivery_status, "full")
+        self.assertEqual(order.substate_id, self.substate_delivered)

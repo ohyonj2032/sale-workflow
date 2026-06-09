@@ -191,6 +191,11 @@ msgid "To validate legal documents"
 msgstr "Para validar documentos legales"
 
 #. module: sale_substate
+#: model_terms:ir.ui.view,arch_db:sale_substate.sale_order_view_form
+msgid "Update Delivery Substate"
+msgstr "Actualizar subestado de entrega"
+
+#. module: sale_substate
 #: model:base.substate,name:sale_substate.base_substate_wait_docs
 #: model:mail.template,name:sale_substate.mail_template_data_sale_substate_wait_docs
 msgid "Waiting for legal documents"

@@ -1,0 +1,238 @@
+diff --git a/sale_substate/__manifest__.py b/sale_substate/__manifest__.py
+index 546abfd2..2b864b3e 100644
+--- a/sale_substate/__manifest__.py
++++ b/sale_substate/__manifest__.py
+@@ -8,7 +8,7 @@
+     "author": "Akretion, " "Odoo Community Association (OCA)",
+     "website": "https://github.com/OCA/sale-workflow",
+     "license": "AGPL-3",
+-    "depends": ["base_substate", "sale_management"],
++    "depends": ["base_substate", "sale_delivery_state"],
+     "data": [
+         "views/sale_views.xml",
+         "data/sale_substate_mail_template_data.xml",
+diff --git a/sale_substate/i18n/es.po b/sale_substate/i18n/es.po
+index 5225ac67..8e3538dd 100644
+--- a/sale_substate/i18n/es.po
++++ b/sale_substate/i18n/es.po
+@@ -190,6 +190,11 @@ msgstr "Subestado"
+ msgid "To validate legal documents"
+ msgstr "Para validar documentos legales"
+ 
++#. module: sale_substate
++#: model_terms:ir.ui.view,arch_db:sale_substate.sale_order_view_form
++msgid "Update Delivery Substate"
++msgstr "Actualizar subestado de entrega"
++
+ #. module: sale_substate
+ #: model:base.substate,name:sale_substate.base_substate_wait_docs
+ #: model:mail.template,name:sale_substate.mail_template_data_sale_substate_wait_docs
+diff --git a/sale_substate/i18n/it.po b/sale_substate/i18n/it.po
+index f5e4823a..a2a57d78 100644
+--- a/sale_substate/i18n/it.po
++++ b/sale_substate/i18n/it.po
+@@ -191,6 +191,11 @@ msgstr "Substato"
+ msgid "To validate legal documents"
+ msgstr "Documenti legali da validare"
+ 
++#. module: sale_substate
++#: model_terms:ir.ui.view,arch_db:sale_substate.sale_order_view_form
++msgid "Update Delivery Substate"
++msgstr "Aggiorna il substato di consegna"
++
+ #. module: sale_substate
+ #: model:base.substate,name:sale_substate.base_substate_wait_docs
+ #: model:mail.template,name:sale_substate.mail_template_data_sale_substate_wait_docs
+diff --git a/sale_substate/i18n/sale_substate.pot b/sale_substate/i18n/sale_substate.pot
+index 71a140cc..25ac85b4 100644
+--- a/sale_substate/i18n/sale_substate.pot
++++ b/sale_substate/i18n/sale_substate.pot
+@@ -145,6 +145,11 @@ msgstr ""
+ msgid "To validate legal documents"
+ msgstr ""
+ 
++#. module: sale_substate
++#: model_terms:ir.ui.view,arch_db:sale_substate.sale_order_view_form
++msgid "Update Delivery Substate"
++msgstr ""
++
+ #. module: sale_substate
+ #: model:base.substate,name:sale_substate.base_substate_wait_docs
+ #: model:mail.template,name:sale_substate.mail_template_data_sale_substate_wait_docs
+diff --git a/sale_substate/models/sale_order.py b/sale_substate/models/sale_order.py
+index 66409eb8..c7408e2d 100644
+--- a/sale_substate/models/sale_order.py
++++ b/sale_substate/models/sale_order.py
+@@ -15,3 +15,28 @@ class BaseSubstateType(models.Model):
+ class SaleOrder(models.Model):
+     _inherit = ["sale.order", "base.substate.mixin"]
+     _name = "sale.order"
++
++    def _get_workflow_substate(self):
++        self.ensure_one()
++        if self.state != "sale":
++            return False
++        if self.delivery_status == "full":
++            return self.env.ref("sale_substate.base_substate_delivered")
++        if self.delivery_status in ("partial", "started"):
++            return self.env.ref("sale_substate.base_substate_in_delivery")
++        return self.env.ref("sale_substate.base_substate_valid_docs")
++
++    def _update_workflow_substate(self):
++        for order in self:
++            target_substate = order._get_workflow_substate()
++            if target_substate and order.substate_id != target_substate:
++                order.substate_id = target_substate
++
++    def action_confirm(self):
++        res = super().action_confirm()
++        self._update_workflow_substate()
++        return res
++
++    def action_deliver(self):
++        self._update_workflow_substate()
++        return True
+diff --git a/sale_substate/tests/test_sale_substate.py b/sale_substate/tests/test_sale_substate.py
+index b363e372..b77bab86 100644
+--- a/sale_substate/tests/test_sale_substate.py
++++ b/sale_substate/tests/test_sale_substate.py
+@@ -5,64 +5,70 @@ from odoo.exceptions import ValidationError
+ from odoo.tests.common import TransactionCase
+ 
+ 
+-class TestBaseSubstate(TransactionCase):
+-    def setUp(self):
+-        super().setUp()
+-        self.substate_test_sale = self.env["sale.order"]
+-        self.substate_test_sale_line = self.env["sale.order.line"]
++class TestSaleSubstate(TransactionCase):
++    @classmethod
++    def setUpClass(cls):
++        super().setUpClass()
++        cls.order_model = cls.env["sale.order"]
++        cls.partner = cls.env.ref("base.res_partner_1")
++        cls.product = cls.env.ref("product.product_product_25")
++        cls.substate_under_nego = cls.env.ref("sale_substate.base_substate_under_nego")
++        cls.substate_valid_docs = cls.env.ref("sale_substate.base_substate_valid_docs")
++        cls.substate_in_delivery = cls.env.ref("sale_substate.base_substate_in_delivery")
++        cls.substate_delivered = cls.env.ref("sale_substate.base_substate_delivered")
+ 
+-        self.substate_under_nego = self.env.ref(
+-            "sale_substate.base_substate_under_nego"
+-        )
+-        self.substate_won = self.env.ref("sale_substate.base_substate_won")
+-        self.substate_wait_docs = self.env.ref("sale_substate.base_substate_wait_docs")
+-        self.substate_valid_docs = self.env.ref(
+-            "sale_substate.base_substate_valid_docs"
+-        )
+-        self.substate_in_delivery = self.env.ref(
+-            "sale_substate.base_substate_in_delivery"
+-        )
+-        self.product_1 = self.env["product.product"].create(
+-            {
+-                "name": "Test Product 1",
+-                "type": "service",
+-            }
+-        )
+-
+-    def test_sale_order_substate(self):
+-        partner = self.env.ref("base.res_partner_1")
+-        so_test1 = self.substate_test_sale.create(
++    @classmethod
++    def _create_sale_order(cls):
++        return cls.order_model.create(
+             {
+-                "name": "Test base substate to basic sale",
+-                "partner_id": partner.id,
++                "name": "Test sale substate workflow",
++                "partner_id": cls.partner.id,
+                 "order_line": [
+                     (
+                         0,
+                         0,
+                         {
+-                            "product_id": self.product_1.id,
++                            "product_id": cls.product.id,
+                             "product_uom_qty": 2,
+-                            "product_uom": self.product_1.uom_id.id,
+-                            "name": "line test",
++                            "product_uom": cls.product.uom_id.id,
++                            "name": cls.product.display_name,
+                             "price_unit": 120.0,
+                         },
+                     )
+                 ],
+             }
+         )
+-        self.assertTrue(so_test1.state == "draft")
+-        self.assertTrue(so_test1.substate_id == self.substate_under_nego)
+ 
+-        # Block substate not corresponding to draft state
++    def test_sale_order_substate(self):
++        order = self._create_sale_order()
++
++        self.assertEqual(order.state, "draft")
++        self.assertEqual(order.substate_id, self.substate_under_nego)
++
+         with self.assertRaises(ValidationError):
+-            so_test1.substate_id = self.substate_valid_docs
+-        # Test that validation of sale order change substate_id
+-        so_test1.action_confirm()
+-        self.assertTrue(so_test1.state == "sale")
+-        self.assertTrue(so_test1.substate_id == self.substate_valid_docs)
++            order.substate_id = self.substate_valid_docs
++
++        order.action_confirm()
++        self.assertEqual(order.state, "sale")
++        self.assertEqual(order.substate_id, self.substate_valid_docs)
++
++        order._action_cancel()
++        self.assertEqual(order.state, "cancel")
++        self.assertFalse(order.substate_id)
++
++    def test_delivery_substate_flow(self):
++        order = self._create_sale_order()
++
++        order.action_confirm()
++        self.assertEqual(order.delivery_status, "pending")
++        self.assertEqual(order.substate_id, self.substate_valid_docs)
++
++        order.order_line.qty_delivered = 1.0
++        order.action_deliver()
++        self.assertEqual(order.delivery_status, "partial")
++        self.assertEqual(order.substate_id, self.substate_in_delivery)
+ 
+-        # Test that substate_id is set to false if
+-        # there is not substate corresponding to state
+-        so_test1._action_cancel()
+-        self.assertTrue(so_test1.state == "cancel")
+-        self.assertTrue(not so_test1.substate_id)
++        order.order_line.qty_delivered = order.order_line.product_uom_qty
++        order.action_deliver()
++        self.assertEqual(order.delivery_status, "full")
++        self.assertEqual(order.substate_id, self.substate_delivered)
+diff --git a/sale_substate/views/sale_views.xml b/sale_substate/views/sale_views.xml
+index 5bb64473..890509a5 100644
+--- a/sale_substate/views/sale_views.xml
++++ b/sale_substate/views/sale_views.xml
+@@ -1,6 +1,4 @@
+ <?xml version="1.0" encoding="utf-8" ?>
+-<!-- Copyright 2019 Akretion
+-    License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl). -->
+ <odoo>
+     <record id="sale_order_view_form" model="ir.ui.view">
+         <field name="model">sale.order</field>
+@@ -8,6 +6,13 @@
+         <field name="arch" type="xml">
+             <xpath expr="//header" position="after">
+                 <header name="substate">
++                    <field name="delivery_status" invisible="1" />
++                    <button
++                        name="action_deliver"
++                        type="object"
++                        string="Update Delivery Substate"
++                        invisible="state != 'sale' or delivery_status not in ('started', 'partial', 'full')"
++                    />
+                     <field
+                         name="substate_id"
+                         widget="statusbar"
