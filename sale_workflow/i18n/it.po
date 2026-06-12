@@ -1,0 +1,27 @@
+# Translation of Odoo Server.
+# This file contains the translation of the following modules:
+# 	* sale_workflow
+#
+msgid ""
+msgstr ""
+"Language: it\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#. module: sale_workflow
+#: model:ir.model.fields.selection,name:sale_workflow.selection__sale_order__state__delivered
+msgid "Delivered"
+msgstr "Consegnato"
+
+#. module: sale_workflow
+#: model:ir.model.fields.selection,name:sale_workflow.selection__sale_order__state__partial
+msgid "Partial Delivery"
+msgstr "Consegna Parziale"
+
+#. module: sale_workflow
+#. odoo-python
+#: code:addons/sale_workflow/models/sale_order.py:0
+#, python-format
+msgid "Delivery can only be processed for confirmed or partially delivered orders."
+msgstr "La consegna può essere elaborata solo per ordini confermati o parzialmente consegnati."

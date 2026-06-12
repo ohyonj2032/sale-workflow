@@ -1,0 +1,189 @@
+--- /dev/null
++++ b/sale_workflow/__init__.py
+@@ -0,0 +1,1 @@
++from . import models
+
+--- /dev/null
++++ b/sale_workflow/__manifest__.py
+@@ -0,0 +1,16 @@
++{
++    'name': 'Sale Workflow',
++    'version': '16.0.1.0.0',
++    'category': 'Sales',
++    'summary': 'Refactored sale workflow module',
++    'depends': [
++        'sale_management',
++        'stock',
++    ],
++    'data': [
++        'views/sale_order_views.xml',
++    ],
++    'installable': True,
++    'application': False,
++    'license': 'LGPL-3',
++}
+
+--- /dev/null
++++ b/sale_workflow/i18n/es.po
+@@ -0,0 +1,27 @@
++# Translation of Odoo Server.
++# This file contains the translation of the following modules:
++# 	* sale_workflow
++#
++msgid ""
++msgstr ""
++"Language: es\n"
++"MIME-Version: 1.0\n"
++"Content-Type: text/plain; charset=UTF-8\n"
++"Content-Transfer-Encoding: 8bit\n"
++
++#. module: sale_workflow
++#: model:ir.model.fields.selection,name:sale_workflow.selection__sale_order__state__delivered
++msgid "Delivered"
++msgstr "Entregado"
++
++#. module: sale_workflow
++#: model:ir.model.fields.selection,name:sale_workflow.selection__sale_order__state__partial
++msgid "Partial Delivery"
++msgstr "Entrega Parcial"
++
++#. module: sale_workflow
++#. odoo-python
++#: code:addons/sale_workflow/models/sale_order.py:0
++#, python-format
++msgid "Delivery can only be processed for confirmed or partially delivered orders."
++msgstr "La entrega solo se puede procesar para pedidos confirmados o parcialmente entregados."
+
+--- /dev/null
++++ b/sale_workflow/i18n/it.po
+@@ -0,0 +1,27 @@
++# Translation of Odoo Server.
++# This file contains the translation of the following modules:
++# 	* sale_workflow
++#
++msgid ""
++msgstr ""
++"Language: it\n"
++"MIME-Version: 1.0\n"
++"Content-Type: text/plain; charset=UTF-8\n"
++"Content-Transfer-Encoding: 8bit\n"
++
++#. module: sale_workflow
++#: model:ir.model.fields.selection,name:sale_workflow.selection__sale_order__state__delivered
++msgid "Delivered"
++msgstr "Consegnato"
++
++#. module: sale_workflow
++#: model:ir.model.fields.selection,name:sale_workflow.selection__sale_order__state__partial
++msgid "Partial Delivery"
++msgstr "Consegna Parziale"
++
++#. module: sale_workflow
++#. odoo-python
++#: code:addons/sale_workflow/models/sale_order.py:0
++#, python-format
++msgid "Delivery can only be processed for confirmed or partially delivered orders."
++msgstr "La consegna può essere elaborata solo per ordini confermati o parzialmente consegnati."
+
+--- /dev/null
++++ b/sale_workflow/models/__init__.py
+@@ -0,0 +1,1 @@
++from . import sale_order
+
+--- /dev/null
++++ b/sale_workflow/models/sale_order.py
+@@ -0,0 +1,27 @@
++from odoo import models, fields, api, _
++from odoo.exceptions import UserError
++
++class SaleOrder(models.Model):
++    _inherit = 'sale.order'
++
++    state = fields.Selection(
++        selection_add=[
++            ('partial', 'Partial Delivery'),
++            ('delivered', 'Delivered'),
++        ],
++        ondelete={
++            'partial': 'set default',
++            'delivered': 'set default',
++        }
++    )
++
++    def action_confirm(self):
++        res = super(SaleOrder, self).action_confirm()
++        return res
++
++    def action_deliver(self):
++        for order in self:
++            if order.state not in ['sale', 'partial']:
++                raise UserError(_('Delivery can only be processed for confirmed or partially delivered orders.'))
++            order.state = 'delivered'
++        return True
+
+--- /dev/null
++++ b/sale_workflow/tests/__init__.py
+@@ -0,0 +1,1 @@
++from . import test_sale_workflow
+
+--- /dev/null
++++ b/sale_workflow/tests/test_sale_workflow.py
+@@ -0,0 +1,41 @@
++from odoo.tests.common import TransactionCase
++from odoo.exceptions import UserError
++
++class TestSaleWorkflow(TransactionCase):
++
++    @classmethod
++    def setUpClass(cls):
++        super(TestSaleWorkflow, cls).setUpClass()
++        cls.partner = cls.env['res.partner'].create({'name': 'Test Partner'})
++        cls.product = cls.env['product.product'].create({
++            'name': 'Test Product',
++            'type': 'consu',
++        })
++        cls.sale_order = cls.env['sale.order'].create({
++            'partner_id': cls.partner.id,
++            'order_line': [(0, 0, {
++                'product_id': cls.product.id,
++                'product_uom_qty': 10,
++                'price_unit': 100.0,
++            })],
++        })
++
++    def test_action_confirm(self):
++        """Test confirmation logic"""
++        self.sale_order.action_confirm()
++        self.assertEqual(self.sale_order.state, 'sale', 'State should be confirmed')
++
++    def test_partial_delivery_transition(self):
++        """Test partial delivery transition logic"""
++        self.sale_order.action_confirm()
++        self.sale_order.state = 'partial'
++        self.assertEqual(self.sale_order.state, 'partial', 'State should be partial')
++        
++        self.sale_order.action_deliver()
++        self.assertEqual(self.sale_order.state, 'delivered', 'State should be delivered after partial')
++
++    def test_invalid_delivery(self):
++        """Test invalid delivery from draft state"""
++        self.assertEqual(self.sale_order.state, 'draft')
++        with self.assertRaises(UserError):
++            self.sale_order.action_deliver()
+
+--- /dev/null
++++ b/sale_workflow/views/sale_order_views.xml
+@@ -0,0 +1,13 @@
++<?xml version="1.0" encoding="utf-8"?>
++<odoo>
++    <record id="view_order_form_inherit_workflow" model="ir.ui.view">
++        <field name="name">sale.order.form.inherit.workflow</field>
++        <field name="model">sale.order</field>
++        <field name="inherit_id" ref="sale.view_order_form"/>
++        <field name="arch" type="xml">
++            <xpath expr="//header" position="inside">
++                <button name="action_deliver" type="object" string="Deliver" class="btn-primary" attrs="{'invisible': [('state', 'not in', ['sale', 'partial'])]}"/>
++            </xpath>
++        </field>
++    </record>
++</odoo>
