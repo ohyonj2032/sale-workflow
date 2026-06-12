@@ -22,6 +22,12 @@ class SaleOrderLine(models.Model):
         store=True,
         readonly=True,
     )
+    x_total_margin = fields.Float(
+        string="Total Margin",
+        compute="_compute_x_total_margin",
+        store=True,
+        readonly=True,
+    )
 
     @api.depends(
         "move_ids.state",
@@ -47,6 +53,12 @@ class SaleOrderLine(models.Model):
         """Computes the remaining quantity to plan on sale order lines"""
         for line in self:
             line.qty_to_procure = line.product_uom_qty - line.qty_procured
+
+    @api.depends("price_subtotal", "product_uom_qty", "product_id", "product_id.standard_price")
+    def _compute_x_total_margin(self):
+        for line in self:
+            cost_price = line.product_id.standard_price or 0.0
+            line.x_total_margin = line.price_subtotal - cost_price * line.product_uom_qty
 
     def _get_procurement_group(self):
         # Overload to get the procurement.group for the right date / partner

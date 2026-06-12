@@ -1,0 +1,133 @@
+stages:
+  - test
+  - deploy
+
+variables:
+  ODOO_ADDONS_PATH: "/opt/odoo/addons"
+  ODOO_DB_HOST: "${CI_ODOO_DB_HOST}"
+  ODOO_DB_PORT: "${CI_ODOO_DB_PORT:-5432}"
+  ODOO_DB_USER: "${CI_ODOO_DB_USER:-odoo}"
+  ODOO_DB_NAME: "${CI_ODOO_DB_NAME:-odoo_ci}"
+  LOCK_WAIT_THRESHOLD: 5
+
+.test_template: &test_template
+  stage: test
+  image: odoo:18.0
+  services:
+    - postgres:16
+  variables:
+    DB_HOST: postgres
+    DB_PORT: "5432"
+  before_script:
+    - pip install click-odoo
+    - click-odoo-update --database="$ODOO_DB_NAME" --addons-path="$ODOO_ADDONS_PATH" --workers=0 --stop-after-init
+  script:
+    - |
+      echo "[INFO] Starting lock-wait monitor background process"
+      monitor_started_at=$(date +%s)
+      while true; do
+        blocked_queries=$(psql \
+          -h "$DB_HOST" -p "$DB_PORT" -U "$ODOO_DB_USER" -d "$ODOO_DB_NAME" -t -A \
+          -c "SELECT count(*) FROM pg_stat_activity
+              WHERE state = 'active'
+              AND wait_event_type = 'Lock'
+              AND query_start < now() - interval '${LOCK_WAIT_THRESHOLD} seconds';" 2>/dev/null || echo "0")
+        if [ "${blocked_queries:-0}" -gt 0 ]; then
+          echo "[ALERT] Detected ${blocked_queries} queries waiting on locks for > ${LOCK_WAIT_THRESHOLD}s"
+          psql \
+            -h "$DB_HOST" -p "$DB_PORT" -U "$ODOO_DB_USER" -d "$ODOO_DB_NAME" \
+            -c "SELECT pid, usename, application_name, state, wait_event_type, wait_event,
+                       query_start, now() - query_start AS wait_duration,
+                       LEFT(query, 200) AS query_preview
+                FROM pg_stat_activity
+                WHERE state = 'active'
+                AND wait_event_type = 'Lock'
+                AND query_start < now() - interval '${LOCK_WAIT_THRESHOLD} seconds'
+                ORDER BY query_start;"
+          echo "[BLOCK] Pipeline blocked: lock wait exceeded ${LOCK_WAIT_THRESHOLD}s threshold"
+          kill %1 2>/dev/null || true
+          exit 1
+        fi
+        sleep 2
+      done &
+      LOCK_MONITOR_PID=$!
+      echo "[INFO] Lock monitor running with PID=$LOCK_MONITOR_PID"
+    - click-odoo-update --database="$ODOO_DB_NAME" --addons-path="$ODOO_ADDONS_PATH" --workers=0 --stop-after-init --log-level=info
+    - |
+      ret=$?
+      kill $LOCK_MONITOR_PID 2>/dev/null || true
+      wait $LOCK_MONITOR_PID 2>/dev/null || true
+      if [ $ret -ne 0 ]; then
+        echo "[ERROR] click-odoo-update failed with exit code $ret"
+        exit $ret
+      fi
+      echo "[INFO] All locks cleared within threshold, migration completed successfully"
+
+test_sale_workflow:
+  <<: *test_template
+  variables:
+    ODOO_DB_NAME: "${CI_ODOO_DB_NAME:-odoo_ci_test}"
+
+deploy_staging:
+  stage: deploy
+  image: odoo:18.0
+  variables:
+    ODOO_DB_NAME: "${STAGING_DB_NAME}"
+    LOCK_WAIT_THRESHOLD: 5
+  before_script:
+    - pip install click-odoo
+  script:
+    - |
+      echo "[INFO] Checking lock contention before deployment"
+      blocked_before=$(psql \
+        -h "$ODOO_DB_HOST" -p "$ODOO_DB_PORT" -U "$ODOO_DB_USER" -d "$ODOO_DB_NAME" -t -A \
+        -c "SELECT count(*) FROM pg_stat_activity
+            WHERE state = 'active'
+            AND wait_event_type = 'Lock'
+            AND query_start < now() - interval '${LOCK_WAIT_THRESHOLD} seconds';" 2>/dev/null || echo "0")
+      if [ "${blocked_before:-0}" -gt 0 ]; then
+        echo "[ALERT] Pre-existing lock contention detected on staging DB"
+        exit 1
+      fi
+    - |
+      echo "[INFO] Starting lock monitor in background"
+      while true; do
+        blocked=$(psql \
+          -h "$ODOO_DB_HOST" -p "$ODOO_DB_PORT" -U "$ODOO_DB_USER" -d "$ODOO_DB_NAME" -t -A \
+          -c "SELECT count(*) FROM pg_stat_activity
+              WHERE state = 'active'
+              AND wait_event_type = 'Lock'
+              AND query_start < now() - interval '${LOCK_WAIT_THRESHOLD} seconds';" 2>/dev/null || echo "0")
+        if [ "${blocked:-0}" -gt 0 ]; then
+          echo "[ALERT] Lock wait > ${LOCK_WAIT_THRESHOLD}s detected during deployment"
+          psql \
+            -h "$ODOO_DB_HOST" -p "$ODOO_DB_PORT" -U "$ODOO_DB_USER" -d "$ODOO_DB_NAME" \
+            -c "SELECT pid, usename, application_name, state, wait_event_type, wait_event,
+                       query_start, now() - query_start AS wait_duration,
+                       LEFT(query, 200) AS query_preview
+                FROM pg_stat_activity
+                WHERE state = 'active'
+                AND wait_event_type = 'Lock'
+                AND query_start < now() - interval '${LOCK_WAIT_THRESHOLD} seconds'
+                ORDER BY query_start;"
+          kill $$ 2>/dev/null || true
+          exit 1
+        fi
+        sleep 2
+      done &
+      LOCK_MONITOR_PID=$!
+    - click-odoo-update --database="$ODOO_DB_NAME" --addons-path="$ODOO_ADDONS_PATH" --workers=0 --stop-after-init --log-level=info
+    - |
+      ret=$?
+      kill $LOCK_MONITOR_PID 2>/dev/null || true
+      wait $LOCK_MONITOR_PID 2>/dev/null || true
+      if [ $ret -ne 0 ]; then
+        echo "[ERROR] Deployment failed with exit code $ret"
+        exit $ret
+      fi
+      echo "[INFO] Deployment completed successfully"
+  environment:
+    name: staging
+  only:
+    - main
+    - develop

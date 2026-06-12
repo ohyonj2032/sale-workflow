@@ -2,6 +2,8 @@ import logging
 
 _logger = logging.getLogger(__name__)
 
+BATCH_SIZE = 10000
+
 
 def pre_init_hook(env):
     cr = env.cr
@@ -86,3 +88,57 @@ FROM sol_qty_procured
 WHERE sol_qty_procured.id = sol.id
     """)
     _logger.info("Finished pre-populating fields")
+
+
+def post_init_hook(env):
+    cr = env.cr
+    _logger.info("Backfilling x_total_margin using raw SQL in batches")
+
+    ensure_column_safe(cr)
+
+    total_updated = 0
+    while True:
+        cr.execute(
+            """
+            WITH batch AS (
+                SELECT id FROM sale_order_line
+                WHERE x_total_margin IS NULL
+                LIMIT %s
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE sale_order_line sol
+            SET x_total_margin = (
+                sol.price_subtotal
+                - COALESCE(
+                    (
+                        SELECT pt.standard_price
+                        FROM product_template pt
+                        JOIN product_product pp ON pp.product_tmpl_id = pt.id
+                        WHERE pp.id = sol.product_id
+                    ), 0.0
+                ) * sol.product_uom_qty
+            )
+            FROM batch
+            WHERE sol.id = batch.id
+            """,
+            (BATCH_SIZE,),
+        )
+        rowcount = cr.rowcount
+        if rowcount == 0:
+            break
+        total_updated += rowcount
+        cr.commit()
+        _logger.info("... updated %s rows (cumulative: %s)", rowcount, total_updated)
+
+    _logger.info(
+        "Finished backfilling x_total_margin: %s rows updated", total_updated
+    )
+
+
+def ensure_column_safe(cr):
+    cr.execute(
+        """
+        ALTER TABLE sale_order_line
+        ADD COLUMN IF NOT EXISTS x_total_margin DOUBLE PRECISION
+        """
+    )
