@@ -1,0 +1,76 @@
+# Translation of Odoo Server.
+# This file contains the translation of the following modules:
+# 	* sale_credit_hold
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: Odoo Server 18.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2024-01-01 00:00+0000\n"
+"PO-Revision-Date: 2024-01-01 00:00+0000\n"
+"Last-Translator: \n"
+"Language-Team: Chinese (Simplified)\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: \n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#. module: sale_credit_hold
+#: model_terms:ir.ui.view,arch_db:sale_credit_hold.view_order_form_inherit_credit_hold
+msgid "Release Credit Hold"
+msgstr "解除信用冻结"
+
+#. module: sale_credit_hold
+#: model:ir.model.fields,field_description:sale_credit_hold.field_sale_order__credit_hold
+msgid "Credit Hold"
+msgstr "信用冻结"
+
+#. module: sale_credit_hold
+#: model:ir.model.fields.selection,name:sale_credit_hold.selection__sale_order__state__credit_hold
+msgid "Credit Hold"
+msgstr "信用冻结"
+
+#. module: sale_credit_hold
+#: model:ir.model.fields,field_description:sale_credit_hold.field_res_partner__credit_limit
+msgid "Credit Limit"
+msgstr "信用额度"
+
+#. module: sale_credit_hold
+#: model:ir.model.fields,field_description:sale_credit_hold.field_res_partner__credit_used
+msgid "Credit Used"
+msgstr "已用信用"
+
+#. module: sale_credit_hold
+#: model:ir.model,name:sale_credit_hold.model_res_partner
+msgid "Contact"
+msgstr "联系人"
+
+#. module: sale_credit_hold
+#: model:ir.model.fields,help:sale_credit_hold.field_res_partner__credit_limit
+msgid ""
+"Maximum allowed credit for this partner. Set to 0 to disable credit checks."
+msgstr "该合作伙伴允许的最大信用额度。设置为0以禁用信用检查。"
+
+#. module: sale_credit_hold
+#: model:ir.model.fields,help:sale_credit_hold.field_res_partner__credit_used
+msgid "Total amount of confirmed sale orders for this partner."
+msgstr "该合作伙伴已确认销售订单的总金额。"
+
+#. module: sale_credit_hold
+#: model:ir.model,name:sale_credit_hold.model_sale_order
+msgid "Sales Order"
+msgstr "销售订单"
+
+#. module: sale_credit_hold
+#: code:model=sale.order,name:sale_credit_hold.models.sale_order
+msgid "Only credit-held orders can be released."
+msgstr "只有信用冻结的订单才能被解除冻结。"
+
+#. module: sale_credit_hold
+#: code:model=sale.order,name:sale_credit_hold.models.sale_order
+msgid ""
+"You cannot change a credit-held order to sale state. Use the 'Release "
+"Credit' button instead."
+msgstr ""
+"您不能将信用冻结的订单修改为销售状态。请使用"解除信用冻结"按钮。"

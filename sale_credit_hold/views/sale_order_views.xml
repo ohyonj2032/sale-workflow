@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+    <record id="view_order_form_inherit_credit_hold" model="ir.ui.view">
+        <field name="name">sale.order.form.credit.hold</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_form" />
+        <field name="arch" type="xml">
+            <field name="state" position="before">
+                <button
+                    name="action_release_credit"
+                    type="object"
+                    string="Release Credit Hold"
+                    class="oe_highlight"
+                    invisible="state != 'credit_hold' or not user.has_group('sale_credit_hold.group_credit_manager')"
+                    groups="sale_credit_hold.group_credit_manager"
+                    data-hotkey="shift+r"
+                />
+            </field>
+            <xpath expr="//field[@name='state']" position="attributes">
+                <attribute name="statusbar_visible">draft,sent,credit_hold,sale</attribute>
+            </xpath>
+            <xpath expr="//field[@name='state']" position="after">
+                <field name="credit_hold" invisible="1" />
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_order_tree_inherit_credit_hold" model="ir.ui.view">
+        <field name="name">sale.order.tree.credit.hold</field>
+        <field name="inherit_id" ref="sale.view_order_tree" />
+        <field name="model">sale.order</field>
+        <field name="arch" type="xml">
+            <field name="state" position="attributes">
+                <attribute
+                    name="decoration-danger"
+                >state == 'credit_hold'</attribute>
+            </field>
+        </field>
+    </record>
+
+    <record
+        id="sale_order_view_search_inherit_credit_hold"
+        model="ir.ui.view"
+    >
+        <field name="name">sale.order.search.credit.hold</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.sale_order_view_search_inherit_sale" />
+        <field name="arch" type="xml">
+            <filter name="order_date" position="after">
+                <separator />
+                <filter
+                    string="Credit Hold"
+                    name="filter_credit_hold"
+                    domain="[('state', '=', 'credit_hold')]"
+                />
+            </filter>
+        </field>
+    </record>
+
+    <record id="view_partner_form_inherit_credit_limit" model="ir.ui.view">
+        <field name="name">res.partner.form.credit.limit</field>
+        <field name="model">res.partner</field>
+        <field name="inherit_id" ref="base.view_partner_form" />
+        <field name="arch" type="xml">
+            <xpath expr="//page[@name='sales_and_purchases']" position="inside">
+                <group name="credit_hold_info" string="Credit Information">
+                    <group>
+                        <field name="credit_limit" />
+                        <field name="credit_used" />
+                    </group>
+                </group>
+            </xpath>
+        </field>
+    </record>
+</odoo>
