@@ -1,0 +1,177 @@
+# -----------------------------------------------------------------------------
+# GitLab CI — Incremental deploy with click-odoo-update + row-lock monitoring
+# -----------------------------------------------------------------------------
+#
+# 1. Runs click-odoo-update against a *clone* of the production database so
+#    the post_init_hook actually exercises the "column exists but rows are
+#    NULL" dirty state the production database carries.
+# 2. Parallel to click-odoo-update, a watcher polls PostgreSQL's
+#    ``pg_stat_activity`` and fails the pipeline with an alert if any
+#    ``sale_order`` tuple lock is held longer than ``LOCK_WAIT_THRESHOLD=5``
+#    seconds — the same threshold baked into the hook's ``SET LOCAL
+#    lock_timeout TO '5s'``.
+#
+# Required (protected) CI variables:
+#   - PGHOST / PGPORT / PGDATABASE / PGUSER / PGPASSWORD
+#     (a non-superuser role carrying ``pg_monitor`` + ``pg_read_all_stats``).
+#   - ODOO_RC  pointing at the odoo.cfg used by click-odoo-update.
+#
+# Optional overrides (CI variables):
+#   - LOCK_WAIT_THRESHOLD   seconds before the watcher trips (default 5)
+#   - BACKFILL_BATCH_SIZE   forwarded to the hook via env (default 1000)
+# -----------------------------------------------------------------------------
+
+variables:
+  LOCK_WAIT_THRESHOLD: "5"
+  BACKFILL_BATCH_SIZE: "1000"
+  PGCONNECT_TIMEOUT: "10"
+  ODOO_VERSION: "16.0"
+
+.incremental_deploy:
+  image: ${CI_REGISTRY}/infrastructure/odoo-toolbox:${ODOO_VERSION}
+  stage: deploy
+  services:
+    - name: postgres:14-alpine
+      alias: postgres
+  script:
+    # -- preflight: ensure the hook source is sane ---------------------------
+    - |
+      grep -E "x_total_margin IS NULL" \
+        sale_manual_delivery/hook.py >/dev/null \
+      || {
+        echo "[ERROR] post_init_hook idempotency guard missing";
+        exit 2;
+      }
+
+    # -- step 1: install click-odoo-update and dependencies -----------------
+    - pip install --quiet "click-odoo-update>=1.3.0" psycopg2-binary
+
+    # -- step 2: start the row-lock watcher (background) --------------------
+    # Polls pg_stat_activity every second. Exits non-zero when a tuple lock
+    # on ``sale_order`` is held for >= $LOCK_WAIT_THRESHOLD seconds, which
+    # is the exact symptom of the hook inadvertently escalating to a table
+    # lock under write contention.
+    - |
+      cat >/tmp/lock-watcher.sh <<'WATCHER'
+      #!/usr/bin/env bash
+      set -u
+      threshold=${LOCK_WAIT_THRESHOLD:-5}
+      sql=$(cat <<'SQL'
+        SELECT pid,
+               now() - query_start AS duration,
+               state,
+               wait_event_type,
+               wait_event,
+               LEFT(query, 160) AS query
+        FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND state = 'active'
+          AND wait_event_type = 'Lock'
+          AND query ILIKE '%sale_order%'
+          AND (now() - query_start) > interval '1 second'
+        ORDER BY (now() - query_start) DESC
+        LIMIT 5;
+      SQL
+      )
+      alerted=0
+      while true; do
+        sleep 1
+        out=$(psql -v ON_ERROR_STOP=1 -A -F '|' -R '||' -t -c "$sql" 2>/dev/null)
+        [ -z "$out" ] && continue
+        # Compute longest duration (first field of the first row)
+        longest_seconds=$(
+          echo "$out" \
+          | head -n 1 \
+          | awk -F '|' '{ gsub(/[^0-9.]/, "", $1); print int($1) }'
+        )
+        longest_seconds=${longest_seconds:-0}
+        if [ "$longest_seconds" -ge "$threshold" ]; then
+          echo >&2
+          echo "[ALERT] Row-lock on sale_order held for ${longest_seconds}s " \
+               "(threshold=${threshold}s):" >&2
+          echo "$out" >&2
+          alerted=1
+          break
+        fi
+      done
+      exit $alerted
+      WATCHER
+      chmod +x /tmp/lock-watcher.sh
+      /tmp/lock-watcher.sh &
+      WATCHER_PID=$!
+      echo "[INFO] lock-watcher started (pid=${WATCHER_PID}, threshold=${LOCK_WAIT_THRESHOLD}s)"
+
+    # -- step 3: run click-odoo-update --------------------------------------
+    - |
+      click-odoo-update \
+        --config "${ODOO_RC}" \
+        --if-exists upgrade-all \
+        --update-list "sale_manual_delivery" \
+        2>&1 | tee /tmp/odoo-update.log
+      UPDATE_RC=$?
+
+    # -- step 4: tear down the watcher and surface its verdict --------------
+    - |
+      # Reap the watcher; if it died with rc != 0 during the update, fail.
+      if kill -0 "$WATCHER_PID" 2>/dev/null; then
+        kill "$WATCHER_PID" 2>/dev/null || true
+        wait "$WATCHER_PID" 2>/dev/null || true
+      else
+        # Watcher already exited — harvest its exit status
+        wait "$WATCHER_PID"
+        WATCHER_RC=$?
+        if [ "${WATCHER_RC}" -ne 0 ]; then
+          echo "[FATAL] lock-watcher tripped during click-odoo-update."
+          echo "       See pg_stat_activity dump above. Aborting pipeline."
+          exit 99
+        fi
+      fi
+
+    # -- step 5: surface click-odoo-update status ---------------------------
+    - |
+      if [ "${UPDATE_RC}" -ne 0 ]; then
+        echo "[FATAL] click-odoo-update exited with status ${UPDATE_RC}."
+        tail -n 80 /tmp/odoo-update.log
+        exit "${UPDATE_RC}"
+      fi
+
+    # -- step 6: post-deploy smoke check ------------------------------------
+    # A second run of the hook must be a no-op: if any rows still have
+    # NULL after the first run, the pipeline fails loudly.
+    - |
+      psql -v ON_ERROR_STOP=1 -c "
+        DO \$\$
+        DECLARE
+            null_rows bigint;
+        BEGIN
+            PERFORM 1 FROM information_schema.columns
+            WHERE table_name = 'sale_order' AND column_name = 'x_total_margin';
+            IF FOUND THEN
+                SELECT count(*) INTO null_rows
+                FROM sale_order WHERE x_total_margin IS NULL;
+                IF null_rows > 0 THEN
+                    RAISE EXCEPTION 'post_init_hook left % rows with NULL x_total_margin', null_rows;
+                END IF;
+            END IF;
+        END \$\$;
+      "
+
+# -----------------------------------------------------------------------------
+# Concrete jobs — one per typical environment. We ship an example for the
+# staging environment, which is the one that most commonly exercises the
+# "clone of production" dirty state.
+# -----------------------------------------------------------------------------
+
+incremental_deploy_staging:
+  extends: .incremental_deploy
+  environment:
+    name: staging
+    url: https://staging.example.com
+  only:
+    refs:
+      - main
+    variables:
+      - $CI_COMMIT_MESSAGE =~ /\[deploy\]/
+  tags:
+    - odoo-staging
+  retry: 1

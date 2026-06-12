@@ -20,6 +20,15 @@ class SaleOrder(models.Model):
         compute="_compute_delivery_pending",
     )
 
+    x_total_margin = fields.Monetary(
+        string="Total Margin",
+        currency_field="currency_id",
+        readonly=True,
+        default=0.0,
+        help="Backfilled total margin (price_unit - purchase_price) * qty_delivered, "
+        "computed once at install time via post_init_hook.",
+    )
+
     def _compute_delivery_pending(self):
         for rec in self:
             lines_pending = rec.order_line.filtered(
