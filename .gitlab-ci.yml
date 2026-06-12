@@ -1,0 +1,27 @@
+stages:
+  - test
+  - deploy
+
+test_custom_module:
+  stage: test
+  script:
+    - echo "Running Odoo tests..."
+    # 假设使用 pytest 或 odoo 自身的测试命令
+    - odoo -c /etc/odoo/odoo.conf -d test_db -i sale_workflow_custom --test-enable --stop-after-init
+
+deploy_incremental:
+  stage: deploy
+  script:
+    - echo "Starting incremental deployment with click-odoo-update..."
+    # 通过 PGOPTIONS 环境变量设置 PostgreSQL 的 lock_timeout 为 5000 毫秒（5秒）。
+    # 如果 post_init_hook 或其他升级过程中行锁等待时间超过5秒，PostgreSQL 将主动抛出错误，
+    # click-odoo-update 会捕获该异常并返回非零状态码，从而阻断流水线。
+    - export PGOPTIONS="-c lock_timeout=5000"
+    - |
+      if ! click-odoo-update -c /etc/odoo/odoo.conf -d $ODOO_DB -m sale_workflow_custom; then
+        echo "🚨 [告警] 部署失败！若日志中出现 'canceling statement due to lock timeout'，说明迁移脚本的行锁等待已超过 5 秒。流水线已阻断。"
+        exit 1
+      fi
+  only:
+    - main
+    - master
