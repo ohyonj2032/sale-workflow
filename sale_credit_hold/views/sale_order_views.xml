@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<odoo>
+    <record id="sale_order_form_credit_hold" model="ir.ui.view">
+        <field name="name">sale.order.form.credit_hold</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_form" />
+        <field name="arch" type="xml">
+            <field name="state" position="attributes">
+                <attribute
+                    name="statusbar_visible"
+                >draft,sent,sale,credit_hold,done,cancel</attribute>
+            </field>
+            <xpath expr="//header/button[@name='action_confirm']" position="after">
+                <button
+                    name="action_release_credit"
+                    string="Release Credit Hold"
+                    type="object"
+                    class="btn-primary"
+                    groups="sale_credit_hold.group_credit_manager"
+                    invisible="state != 'credit_hold'"
+                    confirm="Are you sure you want to release the credit hold? This will trigger procurement and delivery processes."
+                />
+            </xpath>
+            <xpath
+                expr="//page[@name='other_information']/group"
+                position="inside"
+            >
+                <group
+                    string="Credit Hold Information"
+                    name="credit_hold_info"
+                    invisible="not credit_hold"
+                >
+                    <field name="credit_hold" invisible="1" />
+                    <field
+                        name="credit_hold_released_date"
+                        invisible="not credit_hold_released_date"
+                    />
+                    <field
+                        name="credit_hold_released_by"
+                        invisible="not credit_hold_released_by"
+                    />
+                </group>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="sale_order_tree_credit_hold" model="ir.ui.view">
+        <field name="name">sale.order.tree.credit_hold</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_tree" />
+        <field name="arch" type="xml">
+            <field name="state" position="attributes">
+                <attribute
+                    name="decoration-danger"
+                >state == 'credit_hold'</attribute>
+            </field>
+        </field>
+    </record>
+
+    <record id="sale_order_search_credit_hold" model="ir.ui.view">
+        <field name="name">sale.order.search.credit_hold</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.sale_order_view_search_inherit_sale" />
+        <field name="arch" type="xml">
+            <filter name="my_sale_orders_filter" position="after">
+                <filter
+                    string="Credit Hold"
+                    name="filter_credit_hold"
+                    domain="[('state', '=', 'credit_hold')]"
+                    help="Orders on credit hold"
+                />
+            </filter>
+        </field>
+    </record>
+</odoo>

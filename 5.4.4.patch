@@ -1,0 +1,1205 @@
+diff --git a/sale_credit_hold/__init__.py b/sale_credit_hold/__init__.py
+new file mode 100644
+index 0000000..7e315e1
+--- /dev/null
++++ b/sale_credit_hold/__init__.py
+@@ -0,0 +1,2 @@
++from . import models
++from .hooks import pre_init_hook
+diff --git a/sale_credit_hold/__manifest__.py b/sale_credit_hold/__manifest__.py
+new file mode 100644
+index 0000000..d5c3915
+--- /dev/null
++++ b/sale_credit_hold/__manifest__.py
+@@ -0,0 +1,18 @@
++{
++    "name": "Sale Credit Hold",
++    "summary": "Add credit hold functionality to sale orders to block deliveries when credit limit is exceeded",
++    "version": "16.0.1.0.0",
++    "category": "Sales",
++    "website": "https://github.com/OCA/sale-workflow",
++    "author": "Odoo Community Association (OCA)",
++    "license": "AGPL-3",
++    "installable": True,
++    "depends": ["sale_stock"],
++    "data": [
++        "security/ir.model.access.csv",
++        "security/sale_credit_hold_security.xml",
++        "views/sale_order_views.xml",
++        "views/res_partner_views.xml",
++    ],
++    "pre_init_hook": "pre_init_hook",
++}
+diff --git a/sale_credit_hold/hooks.py b/sale_credit_hold/hooks.py
+new file mode 100644
+index 0000000..0ae6c67
+--- /dev/null
++++ b/sale_credit_hold/hooks.py
+@@ -0,0 +1,101 @@
++import logging
++
++from odoo.tools.sql import column_exists, create_column
++
++_logger = logging.getLogger(__name__)
++
++BATCH_SIZE = 1000
++
++
++def pre_init_hook(env):
++    cr = env.cr
++    _add_credit_limit_column(cr)
++    _add_credit_hold_columns(cr)
++    _migrate_credit_hold_orders(cr)
++
++
++def _add_credit_limit_column(cr):
++    if not column_exists(cr, "res_partner", "credit_limit"):
++        _logger.info("Creating res_partner.credit_limit column")
++        create_column(cr, "res_partner", "credit_limit", "numeric")
++
++
++def _add_credit_hold_columns(cr):
++    if not column_exists(cr, "sale_order", "credit_hold_released_date"):
++        _logger.info("Creating sale_order.credit_hold_released_date column")
++        create_column(cr, "sale_order", "credit_hold_released_date", "timestamp")
++    if not column_exists(cr, "sale_order", "credit_hold_released_by"):
++        _logger.info("Creating sale_order.credit_hold_released_by column")
++        create_column(cr, "sale_order", "credit_hold_released_by", "int4")
++
++
++def _migrate_credit_hold_orders(cr):
++    if not _has_account_move_line(cr):
++        _logger.info(
++            "account_move_line table not available, skipping credit hold migration"
++        )
++        return
++    _logger.info("Starting credit hold migration for historical sale orders")
++    total_updated = 0
++    last_id = 0
++    while True:
++        cr.execute(
++            """
++            WITH partner_credit AS (
++                SELECT
++                    aml.partner_id,
++                    SUM(aml.balance) AS total_credit
++                FROM account_move_line aml
++                JOIN account_move am ON aml.move_id = am.id
++                WHERE aml.account_type = 'asset_receivable'
++                    AND am.state = 'posted'
++                    AND aml.parent_state = 'posted'
++                GROUP BY aml.partner_id
++            )
++            SELECT so.id
++            FROM sale_order so
++            JOIN res_partner rp ON so.partner_id = rp.id
++            JOIN partner_credit pc ON rp.id = pc.partner_id
++            WHERE so.state = 'sale'
++                AND so.id > %s
++                AND rp.credit_limit > 0
++                AND pc.total_credit > rp.credit_limit
++            ORDER BY so.id
++            LIMIT %s
++            """,
++            (last_id, BATCH_SIZE),
++        )
++        rows = cr.fetchall()
++        if not rows:
++            break
++        order_ids = [r[0] for r in rows]
++        last_id = order_ids[-1]
++        cr.execute(
++            """
++            UPDATE sale_order
++            SET state = 'credit_hold'
++            WHERE id = ANY(%s)
++            """,
++            (order_ids,),
++        )
++        total_updated += len(order_ids)
++        cr.commit()
++        _logger.info(
++            "Migrated %s orders to credit_hold (total: %s, last_id: %s)",
++            len(order_ids),
++            total_updated,
++            last_id,
++        )
++    _logger.info("Credit hold migration completed. Total updated: %s", total_updated)
++
++
++def _has_account_move_line(cr):
++    cr.execute(
++        """
++        SELECT EXISTS (
++            SELECT 1 FROM information_schema.tables
++            WHERE table_name = 'account_move_line'
++        )
++        """
++    )
++    return cr.fetchone()[0]
+diff --git a/sale_credit_hold/i18n/zh_CN.po b/sale_credit_hold/i18n/zh_CN.po
+new file mode 100644
+index 0000000..01632de
+--- /dev/null
++++ b/sale_credit_hold/i18n/zh_CN.po
+@@ -0,0 +1,128 @@
++# Translation of Odoo Server.
++# This file contains the translation of the following modules:
++# 	* sale_credit_hold
++#
++msgid ""
++msgstr ""
++"Project-Id-Version: Odoo Server 16.0\n"
++"Report-Msgid-Bugs-To: \n"
++"PO-Revision-Date: 2025-01-01 00:00+0000\n"
++"Last-Translator: \n"
++"Language-Team: \n"
++"Language: zh_CN\n"
++"MIME-Version: 1.0\n"
++"Content-Type: text/plain; charset=UTF-8\n"
++"Content-Transfer-Encoding: \n"
++"Plural-Forms: nplurals=1; plural=0;\n"
++
++#. module: sale_credit_hold
++#: model:ir.model,name:sale_credit_hold.model_res_partner
++msgid "Contact"
++msgstr "联系人"
++
++#. module: sale_credit_hold
++#: model:ir.model.fields,field_description:sale_credit_hold.field_res_partner__credit_limit
++msgid "Credit Limit"
++msgstr "信用额度"
++
++#. module: sale_credit_hold
++#: model:ir.model.fields,help:sale_credit_hold.field_res_partner__credit_limit
++msgid ""
++"Maximum credit allowed for this partner. "
++"When exceeded, new sale orders will be put on credit hold."
++msgstr ""
++"该客户允许的最大信用额度。"
++"超出后，新的销售订单将被信用冻结。"
++
++#. module: sale_credit_hold
++#: model:res.groups,name:sale_credit_hold.group_credit_manager
++msgid "Credit Manager"
++msgstr "信用管理员"
++
++#. module: sale_credit_hold
++#: model:res.groups,comment:sale_credit_hold.group_credit_manager
++msgid ""
++"The user will be able to release credit-hold sale orders."
++msgstr "该用户将能够解除信用冻结的销售订单。"
++
++#. module: sale_credit_hold
++#: model:ir.model.fields,field_description:sale_credit_hold.field_sale_order__credit_hold
++msgid "Credit Hold"
++msgstr "信用冻结"
++
++#. module: sale_credit_hold
++#: model:ir.model.fields,help:sale_credit_hold.field_sale_order__credit_hold
++msgid "Technical field indicating the order is on credit hold"
++msgstr "技术字段，指示订单处于信用冻结状态"
++
++#. module: sale_credit_hold
++#: model:ir.model.fields,field_description:sale_credit_hold.field_sale_order__credit_hold_released_date
++msgid "Credit Hold Released Date"
++msgstr "信用冻结解除日期"
++
++#. module: sale_credit_hold
++#: model:ir.model.fields,field_description:sale_credit_hold.field_sale_order__credit_hold_released_by
++msgid "Credit Hold Released By"
++msgstr "信用冻结解除人"
++
++#. module: sale_credit_hold
++#: model_terms:ir.ui.view,arch_db:sale_credit_hold.sale_order_form_credit_hold
++msgid "Credit Hold Information"
++msgstr "信用冻结信息"
++
++#. module: sale_credit_hold
++#: model_terms:ir.ui.view,arch_db:sale_credit_hold.sale_order_search_credit_hold
++msgid "Credit Hold"
++msgstr "信用冻结"
++
++#. module: sale_credit_hold
++#: model_terms:ir.ui.view,arch_db:sale_credit_hold.sale_order_form_credit_hold
++msgid "Release Credit Hold"
++msgstr "解除信用冻结"
++
++#. module: sale_credit_hold
++#: model_terms:ir.ui.view,arch_db:sale_credit_hold.sale_order_form_credit_hold
++msgid ""
++"Are you sure you want to release the credit hold? "
++"This will trigger procurement and delivery processes."
++msgstr ""
++"确定要解除信用冻结吗？"
++"这将触发采购和发货流程。"
++
++#. module: sale_credit_hold
++#: model:ir.model,name:sale_credit_hold.model_sale_order
++msgid "Sales Order"
++msgstr "销售订单"
++
++#. module: sale_credit_hold
++#. odoo-python
++#: code:addons/sale_credit_hold/models/sale_order.py:0
++msgid "Only Credit Managers can release credit-hold orders."
++msgstr "只有信用管理员才能解除信用冻结订单。"
++
++#. module: sale_credit_hold
++#. odoo-python
++#: code:addons/sale_credit_hold/models/sale_order.py:0
++msgid ""
++"Credit hold released by %(user)s. "
++"Procurement and delivery processes have been triggered."
++msgstr ""
++"由 %(user)s 解除信用冻结。"
++"采购和发货流程已触发。"
++
++#. module: sale_credit_hold
++#. odoo-python
++#: code:addons/sale_credit_hold/models/sale_order.py:0
++msgid ""
++"Cannot change state from credit_hold to sale "
++"for order '%(name)s'. Only Credit Managers "
++"can release credit-hold orders via the "
++"'Release Credit Hold' action."
++msgstr ""
++"无法将订单 '%(name)s' 的状态从信用冻结改为销售。"
++"只有信用管理员才能通过"解除信用冻结"操作来释放信用冻结订单。"
++
++#. module: sale_credit_hold
++#: model:ir.model.fields.selection,name:sale_credit_hold.selection__sale_order__state__credit_hold
++msgid "Credit Hold"
++msgstr "信用冻结"
+diff --git a/sale_credit_hold/models/__init__.py b/sale_credit_hold/models/__init__.py
+new file mode 100644
+index 0000000..3bf5609
+--- /dev/null
++++ b/sale_credit_hold/models/__init__.py
+@@ -0,0 +1,2 @@
++from . import res_partner
++from . import sale_order
+diff --git a/sale_credit_hold/models/res_partner.py b/sale_credit_hold/models/res_partner.py
+new file mode 100644
+index 0000000..af9db95
+--- /dev/null
++++ b/sale_credit_hold/models/res_partner.py
+@@ -0,0 +1,19 @@
++from odoo import api, fields, models
++
++
++class ResPartner(models.Model):
++    _inherit = "res.partner"
++
++    credit_limit = fields.Monetary(
++        string="Credit Limit",
++        currency_field="company_currency_id",
++        tracking=True,
++        help="Maximum credit allowed for this partner. "
++        "When exceeded, new sale orders will be put on credit hold.",
++    )
++
++    @api.model
++    def _commercial_fields(self):
++        commercial_fields = super()._commercial_fields()
++        commercial_fields.append("credit_limit")
++        return commercial_fields
+diff --git a/sale_credit_hold/models/sale_order.py b/sale_credit_hold/models/sale_order.py
+new file mode 100644
+index 0000000..28df654
+--- /dev/null
++++ b/sale_credit_hold/models/sale_order.py
+@@ -0,0 +1,140 @@
++from odoo import _, api, fields, models
++from odoo.exceptions import UserError
++
++
++class SaleOrder(models.Model):
++    _inherit = "sale.order"
++
++    state = fields.Selection(
++        selection_add=[("credit_hold", "Credit Hold")],
++        ondelete={"credit_hold": "set default"},
++    )
++
++    credit_hold = fields.Boolean(
++        string="Credit Hold",
++        compute="_compute_credit_hold",
++        store=True,
++        tracking=True,
++        help="Technical field indicating the order is on credit hold",
++    )
++    credit_hold_released_date = fields.Datetime(
++        string="Credit Hold Released Date",
++        readonly=True,
++        copy=False,
++    )
++    credit_hold_released_by = fields.Many2one(
++        comodel_name="res.users",
++        string="Credit Hold Released By",
++        readonly=True,
++        copy=False,
++    )
++
++    @api.depends("state", "partner_id.credit_limit", "partner_id.credit")
++    def _compute_credit_hold(self):
++        for order in self:
++            if order.state == "credit_hold":
++                order.credit_hold = True
++            elif order.state in ("draft", "sent", "cancel"):
++                order.credit_hold = False
++            else:
++                order.credit_hold = False
++
++    def _get_credit_hold_state_name(self):
++        return "credit_hold"
++
++    def _check_partner_credit_limit(self):
++        self.ensure_one()
++        partner = self.partner_id.commercial_partner_id
++        if not partner.credit_limit:
++            return False
++        if partner.credit_limit <= 0:
++            return False
++        return partner.credit > partner.credit_limit
++
++    def _action_confirm(self):
++        credit_hold_orders = self.browse()
++        normal_orders = self.browse()
++        for order in self:
++            if order.state not in ("draft", "sent"):
++                normal_orders |= order
++            elif order._check_partner_credit_limit():
++                credit_hold_orders |= order
++            else:
++                normal_orders |= order
++
++        if normal_orders:
++            res = super(SaleOrder, normal_orders)._action_confirm()
++        else:
++            res = True
++
++        if credit_hold_orders:
++            credit_hold_orders._set_credit_hold_state()
++
++        return res
++
++    def _set_credit_hold_state(self):
++        now = fields.Datetime.now()
++        for order in self:
++            order.write({"state": "credit_hold", "date_order": now})
++
++    def action_release_credit(self):
++        if not self.env.user.has_group(
++            "sale_credit_hold.group_credit_manager"
++        ):
++            raise UserError(
++                _("Only Credit Managers can release credit-hold orders.")
++            )
++        orders_to_release = self.filtered(
++            lambda o: o.state == "credit_hold"
++        )
++        if not orders_to_release:
++            return True
++        orders_to_release.write(
++            {
++                "state": "sale",
++                "credit_hold_released_date": fields.Datetime.now(),
++                "credit_hold_released_by": self.env.user.id,
++            }
++        )
++        orders_to_release._trigger_credit_hold_procurement()
++        return True
++
++    def _trigger_credit_hold_procurement(self):
++        for order in self:
++            order.order_line._action_launch_stock_rule()
++            msg = _(
++                "Credit hold released by %(user)s. "
++                "Procurement and delivery processes have been triggered.",
++                user=self.env.user.name,
++            )
++            order.message_post(body=msg)
++
++    def action_confirm(self):
++        credit_hold_orders = self.filtered(
++            lambda o: o.state in ("draft", "sent")
++            and o._check_partner_credit_limit()
++        )
++        if credit_hold_orders:
++            return self._action_confirm()
++        return super().action_confirm()
++
++    def write(self, vals):
++        if "state" in vals and vals["state"] == "sale":
++            _bypass = self.env.context.get("bypass_credit_hold_check")
++            _release = self.env.context.get("credit_hold_release")
++            if not _bypass and not _release:
++                for order in self:
++                    if order.state == "credit_hold":
++                        if not self.env.user.has_group(
++                            "sale_credit_hold.group_credit_manager"
++                        ):
++                            raise UserError(
++                                _(
++                                    "Cannot change state from credit_hold to sale "
++                                    "for order '%(name)s'. Only Credit Managers "
++                                    "can release credit-hold orders via the "
++                                    "'Release Credit Hold' action.",
++                                    name=order.display_name,
++                                )
++                            )
++        return super().write(vals)
+diff --git a/sale_credit_hold/security/ir.model.access.csv b/sale_credit_hold/security/ir.model.access.csv
+new file mode 100644
+index 0000000..90b4069
+--- /dev/null
++++ b/sale_credit_hold/security/ir.model.access.csv
+@@ -0,0 +1,2 @@
++id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
++access_sale_credit_hold_default,,sale.model_sale_order,,1,1,1,1
+diff --git a/sale_credit_hold/security/sale_credit_hold_security.xml b/sale_credit_hold/security/sale_credit_hold_security.xml
+new file mode 100644
+index 0000000..27faab9
+--- /dev/null
++++ b/sale_credit_hold/security/sale_credit_hold_security.xml
+@@ -0,0 +1,11 @@
++<?xml version="1.0" encoding="utf-8" ?>
++<odoo noupdate="1">
++    <record id="group_credit_manager" model="res.groups">
++        <field name="name">Credit Manager</field>
++        <field name="category_id" ref="base.module_category_hidden" />
++        <field name="users" eval="[(4, ref('base.user_root'))]" />
++        <field name="comment">
++            The user will be able to release credit-hold sale orders.
++        </field>
++    </record>
++</odoo>
+diff --git a/sale_credit_hold/tests/__init__.py b/sale_credit_hold/tests/__init__.py
+new file mode 100644
+index 0000000..6a72d16
+--- /dev/null
++++ b/sale_credit_hold/tests/__init__.py
+@@ -0,0 +1 @@
++from . import test_sale_credit_hold
+diff --git a/sale_credit_hold/tests/test_sale_credit_hold.py b/sale_credit_hold/tests/test_sale_credit_hold.py
+new file mode 100644
+index 0000000..1e2a7e1
+--- /dev/null
++++ b/sale_credit_hold/tests/test_sale_credit_hold.py
+@@ -0,0 +1,615 @@
++from unittest import mock
++
++from odoo import Command
++from odoo.exceptions import UserError
++from odoo.tests.common import TransactionCase, tagged
++
++
++@tagged("post_install", "-at_install")
++class TestSaleCreditHold(TransactionCase):
++    @classmethod
++    def setUpClass(cls):
++        super().setUpClass()
++        cls.env = cls.env(context=dict(cls.env.context, tracking_disable=True))
++
++        cls.partner = cls.env["res.partner"].create(
++            {"name": "Test Customer", "credit_limit": 1000.0}
++        )
++        cls.product = cls.env["product.product"].create(
++            {
++                "name": "Test Product",
++                "type": "consu",
++                "list_price": 100.0,
++            }
++        )
++
++        cls.credit_manager_group = cls.env.ref(
++            "sale_credit_hold.group_credit_manager"
++        )
++        cls.credit_manager_user = cls.env["res.users"].create(
++            {
++                "name": "Credit Manager",
++                "login": "credit_manager",
++                "groups_id": [
++                    Command.set(
++                        [
++                            cls.env.ref("sales_team.group_sale_manager").id,
++                            cls.credit_manager_group.id,
++                        ]
++                    )
++                ],
++            }
++        )
++        cls.normal_user = cls.env["res.users"].create(
++            {
++                "name": "Normal User",
++                "login": "normal_user",
++                "groups_id": [
++                    Command.set(
++                        [cls.env.ref("sales_team.group_sale_manager").id]
++                    )
++                ],
++            }
++        )
++
++    def _create_sale_order(self, partner=None, product=None, qty=10, price=100.0):
++        partner = partner or self.partner
++        product = product or self.product
++        return self.env["sale.order"].create(
++            {
++                "partner_id": partner.id,
++                "order_line": [
++                    Command.create(
++                        {
++                            "name": product.name,
++                            "product_id": product.id,
++                            "product_uom_qty": qty,
++                            "product_uom": product.uom_id.id,
++                            "price_unit": price,
++                        }
++                    )
++                ],
++            }
++        )
++
++    def _create_invoice_and_confirm(self, partner, amount):
++        move = (
++            self.env["account.move"]
++            .with_user(self.credit_manager_user)
++            .create(
++                {
++                    "move_type": "out_invoice",
++                    "partner_id": partner.id,
++                    "invoice_line_ids": [
++                        Command.create(
++                            {
++                                "name": "Test Line",
++                                "quantity": 1,
++                                "price_unit": amount,
++                            }
++                        )
++                    ],
++                }
++            )
++        )
++        move.action_post()
++        return move
++
++    def test_01_confirm_normal_order_no_credit_limit(self):
++        """Test that a normal order without credit limit confirms normally."""
++        partner_no_limit = self.env["res.partner"].create(
++            {"name": "No Limit Customer", "credit_limit": 0.0}
++        )
++        order = self._create_sale_order(partner=partner_no_limit)
++        order.action_confirm()
++        self.assertEqual(order.state, "sale")
++        self.assertFalse(order.credit_hold)
++
++    def test_02_confirm_order_within_credit_limit(self):
++        """Test that an order within credit limit confirms normally."""
++        order = self._create_sale_order(qty=5, price=100.0)
++        order.action_confirm()
++        self.assertEqual(order.state, "sale")
++        self.assertFalse(order.credit_hold)
++
++    def test_03_confirm_order_exceeds_credit_limit(self):
++        """Test that an order exceeding credit limit goes to credit_hold."""
++        self._create_invoice_and_confirm(self.partner, 900.0)
++        order = self._create_sale_order(qty=5, price=100.0)
++        order.action_confirm()
++        self.assertEqual(order.state, "credit_hold")
++        self.assertTrue(order.credit_hold)
++
++    def test_04_no_picking_created_on_credit_hold(self):
++        """Test that no pickings are created when order is on credit_hold."""
++        self._create_invoice_and_confirm(self.partner, 900.0)
++        order = self._create_sale_order(qty=5, price=100.0)
++        order.action_confirm()
++        self.assertEqual(order.state, "credit_hold")
++        if "picking_ids" in order._fields:
++            self.assertFalse(
++                order.picking_ids,
++                "No pickings should be created for credit hold orders",
++            )
++
++    def test_05_release_credit_hold_by_credit_manager(self):
++        """Test that credit manager can release credit hold."""
++        self._create_invoice_and_confirm(self.partner, 900.0)
++        order = self._create_sale_order(qty=5, price=100.0)
++        order.action_confirm()
++        self.assertEqual(order.state, "credit_hold")
++
++        order.with_user(self.credit_manager_user).action_release_credit()
++        self.assertEqual(order.state, "sale")
++        self.assertFalse(order.credit_hold)
++        self.assertTrue(order.credit_hold_released_date)
++        self.assertEqual(order.credit_hold_released_by, self.credit_manager_user)
++
++    def test_06_normal_user_cannot_release_credit_hold(self):
++        """Test that normal user cannot release credit hold."""
++        self._create_invoice_and_confirm(self.partner, 900.0)
++        order = self._create_sale_order(qty=5, price=100.0)
++        order.action_confirm()
++        self.assertEqual(order.state, "credit_hold")
++
++        with self.assertRaises(UserError):
++            order.with_user(self.normal_user).action_release_credit()
++
++    def test_07_picking_created_after_release(self):
++        """Test that picking is created after credit hold is released."""
++        self._create_invoice_and_confirm(self.partner, 900.0)
++        order = self._create_sale_order(qty=5, price=100.0)
++        order.action_confirm()
++        self.assertEqual(order.state, "credit_hold")
++
++        order.with_user(self.credit_manager_user).action_release_credit()
++        self.assertEqual(order.state, "sale")
++
++        if "picking_ids" in order._fields:
++            self.assertTrue(
++                order.picking_ids,
++                "Pickings should be created after releasing credit hold",
++            )
++
++    def test_08_write_method_prevents_unauthorized_state_change(self):
++        """Test that write method prevents unauthorized state changes."""
++        self._create_invoice_and_confirm(self.partner, 900.0)
++        order = self._create_sale_order(qty=5, price=100.0)
++        order.action_confirm()
++        self.assertEqual(order.state, "credit_hold")
++
++        with self.assertRaises(UserError):
++            order.with_user(self.normal_user).write({"state": "sale"})
++
++    def test_09_write_method_bypass_via_context(self):
++        """Test that context bypass flag allows state changes."""
++        self._create_invoice_and_confirm(self.partner, 900.0)
++        order = self._create_sale_order(qty=5, price=100.0)
++        order.action_confirm()
++        self.assertEqual(order.state, "credit_hold")
++
++        order.with_context(bypass_credit_hold_check=True).write({"state": "sale"})
++        self.assertEqual(order.state, "sale")
++
++    def test_10_already_confirmed_order_not_affected(self):
++        """Test that already confirmed orders are not affected by credit check."""
++        partner_no_limit = self.env["res.partner"].create(
++            {"name": "No Limit", "credit_limit": 0.0}
++        )
++        order = self._create_sale_order(partner=partner_no_limit)
++        order.action_confirm()
++        self.assertEqual(order.state, "sale")
++
++        order.partner_id.credit_limit = 100.0
++        order._compute_credit_hold()
++        self.assertFalse(order.credit_hold)
++
++    def test_11_draft_order_resets_credit_hold(self):
++        """Test that resetting to draft clears credit_hold flag."""
++        self._create_invoice_and_confirm(self.partner, 900.0)
++        order = self._create_sale_order(qty=5, price=100.0)
++        order.action_confirm()
++        self.assertEqual(order.state, "credit_hold")
++
++        order.action_cancel()
++        order.action_draft()
++        self.assertEqual(order.state, "draft")
++        self.assertFalse(order.credit_hold)
++
++    def test_12_action_confirm_with_credit_hold_context(self):
++        """Test that action_confirm returns correctly when credit hold is triggered."""
++        self._create_invoice_and_confirm(self.partner, 900.0)
++        order = self._create_sale_order(qty=5, price=100.0)
++        result = order.action_confirm()
++        self.assertEqual(order.state, "credit_hold")
++
++    def test_13_credit_limit_zero_means_no_limit(self):
++        """Test that credit_limit of 0 means no credit check."""
++        partner = self.env["res.partner"].create(
++            {"name": "Zero Limit", "credit_limit": 0.0}
++        )
++        self._create_invoice_and_confirm(partner, 900.0)
++        order = self._create_sale_order(partner=partner)
++        order.action_confirm()
++        self.assertEqual(order.state, "sale")
++
++    def test_14_credit_limit_negative_means_no_limit(self):
++        """Test that negative credit_limit means no credit check."""
++        partner = self.env["res.partner"].create(
++            {"name": "Negative Limit", "credit_limit": -1.0}
++        )
++        self._create_invoice_and_confirm(partner, 900.0)
++        order = self._create_sale_order(partner=partner)
++        order.action_confirm()
++        self.assertEqual(order.state, "sale")
++
++    def test_15_action_release_credit_on_non_credit_hold_order(self):
++        """Test that releasing credit on non-credit-hold order is a no-op."""
++        order = self._create_sale_order()
++        order.action_confirm()
++        self.assertEqual(order.state, "sale")
++
++        result = order.with_user(
++            self.credit_manager_user
++        ).action_release_credit()
++        self.assertTrue(result)
++
++    def test_16_commercial_partner_credit_limit(self):
++        """Test that child partner inherits credit limit from commercial partner."""
++        parent = self.env["res.partner"].create(
++            {"name": "Parent", "credit_limit": 500.0, "is_company": True}
++        )
++        child = self.env["res.partner"].create(
++            {
++                "name": "Child",
++                "parent_id": parent.id,
++                "is_company": False,
++            }
++        )
++        self._create_invoice_and_confirm(parent, 400.0)
++        order = self._create_sale_order(partner=child, qty=3, price=100.0)
++        order.action_confirm()
++        self.assertEqual(order.state, "credit_hold")
++
++    def test_17_partial_credit_hold_multiple_orders(self):
++        """Test that only orders exceeding credit limit are put on hold."""
++        partner_no_limit = self.env["res.partner"].create(
++            {"name": "No Limit", "credit_limit": 0.0}
++        )
++        self._create_invoice_and_confirm(self.partner, 900.0)
++
++        order1 = self._create_sale_order(partner=partner_no_limit)
++        order2 = self._create_sale_order(partner=self.partner, qty=5, price=100.0)
++
++        (order1 | order2).action_confirm()
++        self.assertEqual(order1.state, "sale")
++        self.assertEqual(order2.state, "credit_hold")
++
++
++@tagged("post_install", "-at_install")
++class TestSaleCreditHoldMigration(TransactionCase):
++    @classmethod
++    def setUpClass(cls):
++        super().setUpClass()
++        cls.env = cls.env(context=dict(cls.env.context, tracking_disable=True))
++
++        cls.partner = cls.env["res.partner"].create(
++            {"name": "Migration Customer", "credit_limit": 500.0}
++        )
++        cls.partner_no_limit = cls.env["res.partner"].create(
++            {"name": "No Limit Customer", "credit_limit": 0.0}
++        )
++        cls.product = cls.env["product.product"].create(
++            {
++                "name": "Test Product",
++                "type": "consu",
++                "list_price": 100.0,
++            }
++        )
++
++    def _create_sale_order(self, partner, qty=10, price=100.0):
++        return self.env["sale.order"].create(
++            {
++                "partner_id": partner.id,
++                "order_line": [
++                    Command.create(
++                        {
++                            "name": self.product.name,
++                            "product_id": self.product.id,
++                            "product_uom_qty": qty,
++                            "product_uom": self.product.uom_id.id,
++                            "price_unit": price,
++                        }
++                    )
++                ],
++            }
++        )
++
++    def _create_invoice_and_confirm(self, partner, amount):
++        move = (
++            self.env["account.move"]
++            .create(
++                {
++                    "move_type": "out_invoice",
++                    "partner_id": partner.id,
++                    "invoice_line_ids": [
++                        Command.create(
++                            {
++                                "name": "Test Line",
++                                "quantity": 1,
++                                "price_unit": amount,
++                            }
++                        )
++                    ],
++                }
++            )
++        )
++        move.action_post()
++        return move
++
++    def test_migration_pre_init_hook(self):
++        """Test the pre_init_hook migration logic."""
++        self._create_invoice_and_confirm(self.partner, 600.0)
++        self._create_invoice_and_confirm(self.partner_no_limit, 600.0)
++
++        order_should_migrate = self._create_sale_order(self.partner)
++        order_should_not_migrate = self._create_sale_order(
++            self.partner_no_limit
++        )
++
++        order_should_migrate.action_confirm()
++        order_should_not_migrate.action_confirm()
++
++        self.assertEqual(order_should_migrate.state, "credit_hold")
++        self.assertEqual(order_should_not_migrate.state, "sale")
++
++        order_should_migrate.with_context(bypass_credit_hold_check=True).write(
++            {"state": "sale"}
++        )
++        self.env.cr.commit()
++
++        self.assertEqual(order_should_migrate.state, "sale")
++
++        from odoo.addons.sale_credit_hold.hooks import _migrate_credit_hold_orders
++
++        _migrate_credit_hold_orders(self.env.cr)
++
++        order_should_migrate.invalidate_cache(["state"], [order_should_migrate.id])
++        order_should_not_migrate.invalidate_cache(["state"], [order_should_not_migrate.id])
++
++        self.assertEqual(
++            order_should_migrate.state,
++            "credit_hold",
++            "Order with credit exceeded should be migrated to credit_hold",
++        )
++        self.assertEqual(
++            order_should_not_migrate.state,
++            "sale",
++            "Order without credit limit should remain in sale state",
++        )
++
++    def test_migration_simulates_pre_install_state(self):
++        """Test migration simulates orders that were in 'sale' state before
++        the module was installed."""
++        self._create_invoice_and_confirm(self.partner, 800.0)
++
++        order = self._create_sale_order(self.partner)
++        order.action_confirm()
++        self.assertEqual(order.state, "credit_hold")
++
++        order.with_context(bypass_credit_hold_check=True).write(
++            {"state": "sale"}
++        )
++        self.env.cr.commit()
++        self.assertEqual(order.state, "sale")
++
++        from odoo.addons.sale_credit_hold.hooks import _migrate_credit_hold_orders
++
++        _migrate_credit_hold_orders(self.env.cr)
++
++        order.invalidate_cache(["state"], [order.id])
++
++        self.assertEqual(
++            order.state,
++            "credit_hold",
++            "Order should be migrated back to credit_hold",
++        )
++
++    def test_migration_does_not_affect_draft_orders(self):
++        """Test that migration does not affect draft orders."""
++        self._create_invoice_and_confirm(self.partner, 800.0)
++
++        order = self._create_sale_order(self.partner)
++        self.assertEqual(order.state, "draft")
++
++        from odoo.addons.sale_credit_hold.hooks import _migrate_credit_hold_orders
++
++        _migrate_credit_hold_orders(self.env.cr)
++
++        self.assertEqual(
++            order.state,
++            "draft",
++            "Draft orders should not be affected by migration",
++        )
++
++    def test_migration_does_not_affect_cancelled_orders(self):
++        """Test that migration does not affect cancelled orders."""
++        self._create_invoice_and_confirm(self.partner, 800.0)
++
++        order = self._create_sale_order(self.partner)
++        order.action_confirm()
++        order.with_context(bypass_credit_hold_check=True).write(
++            {"state": "sale"}
++        )
++        order.action_cancel()
++        self.env.cr.commit()
++        self.assertEqual(order.state, "cancel")
++
++        from odoo.addons.sale_credit_hold.hooks import _migrate_credit_hold_orders
++
++        _migrate_credit_hold_orders(self.env.cr)
++
++        order.invalidate_cache(["state"], [order.id])
++
++        self.assertEqual(
++            order.state,
++            "cancel",
++            "Cancelled orders should not be affected by migration",
++        )
++
++    def test_migration_batch_processing(self):
++        """Test that migration handles large batches correctly."""
++        self._create_invoice_and_confirm(self.partner, 800.0)
++
++        orders = self.env["sale.order"]
++        for _ in range(5):
++            order = self._create_sale_order(self.partner)
++            order.action_confirm()
++            order.with_context(bypass_credit_hold_check=True).write(
++                {"state": "sale"}
++            )
++            orders |= order
++
++        self.env.cr.commit()
++        for order in orders:
++            self.assertEqual(order.state, "sale")
++
++        from odoo.addons.sale_credit_hold.hooks import _migrate_credit_hold_orders
++
++        _migrate_credit_hold_orders(self.env.cr)
++
++        for order in orders:
++            order.invalidate_cache(["state"], [order.id])
++            self.assertEqual(
++                order.state,
++                "credit_hold",
++                f"Order {order.id} should be migrated to credit_hold",
++            )
++
++
++@tagged("post_install", "-at_install")
++class TestSaleCreditHoldStockIntegration(TransactionCase):
++    @classmethod
++    def setUpClass(cls):
++        super().setUpClass()
++        cls.env = cls.env(context=dict(cls.env.context, tracking_disable=True))
++
++        cls.partner = cls.env["res.partner"].create(
++            {"name": "Stock Test Customer", "credit_limit": 500.0}
++        )
++        cls.product = cls.env["product.product"].create(
++            {
++                "name": "Stock Test Product",
++                "type": "consu",
++                "list_price": 100.0,
++            }
++        )
++        cls.credit_manager_user = cls.env["res.users"].create(
++            {
++                "name": "Credit Manager Stock",
++                "login": "credit_manager_stock",
++                "groups_id": [
++                    Command.set(
++                        [
++                            cls.env.ref("sales_team.group_sale_manager").id,
++                            cls.env.ref(
++                                "sale_credit_hold.group_credit_manager"
++                            ).id,
++                        ]
++                    )
++                ],
++            }
++        )
++
++    def _create_sale_order(self, partner=None, qty=10, price=100.0):
++        partner = partner or self.partner
++        return self.env["sale.order"].create(
++            {
++                "partner_id": partner.id,
++                "order_line": [
++                    Command.create(
++                        {
++                            "name": self.product.name,
++                            "product_id": self.product.id,
++                            "product_uom_qty": qty,
++                            "product_uom": self.product.uom_id.id,
++                            "price_unit": price,
++                        }
++                    )
++                ],
++            }
++        )
++
++    def _create_invoice_and_confirm(self, partner, amount):
++        move = (
++            self.env["account.move"]
++            .create(
++                {
++                    "move_type": "out_invoice",
++                    "partner_id": partner.id,
++                    "invoice_line_ids": [
++                        Command.create(
++                            {
++                                "name": "Test Line",
++                                "quantity": 1,
++                                "price_unit": amount,
++                            }
++                        )
++                    ],
++                }
++            )
++        )
++        move.action_post()
++        return move
++
++    def test_release_credit_hold_creates_picking(self):
++        """Test that releasing credit hold creates stock pickings."""
++        self._create_invoice_and_confirm(self.partner, 600.0)
++        order = self._create_sale_order(qty=5, price=100.0)
++        order.action_confirm()
++        self.assertEqual(order.state, "credit_hold")
++
++        if "picking_ids" not in order._fields:
++            return
++
++        self.assertFalse(
++            order.picking_ids,
++            "No pickings should exist while on credit hold",
++        )
++
++        order.with_user(self.credit_manager_user).action_release_credit()
++
++        self.assertTrue(
++            order.picking_ids,
++            "Pickings should be created after credit hold release",
++        )
++
++    def test_release_credit_hold_picking_state(self):
++        """Test picking state after credit hold release."""
++        self._create_invoice_and_confirm(self.partner, 600.0)
++        order = self._create_sale_order(qty=5, price=100.0)
++        order.action_confirm()
++        self.assertEqual(order.state, "credit_hold")
++
++        order.with_user(self.credit_manager_user).action_release_credit()
++        self.assertEqual(order.state, "sale")
++
++        if "picking_ids" in order._fields and order.picking_ids:
++            picking = order.picking_ids[0]
++            self.assertIn(
++                picking.state,
++                ["draft", "waiting", "confirmed", "assigned"],
++                "Picking should be in a valid initial state after release",
++            )
++
++    def test_credit_hold_release_fields_set(self):
++        """Test that release tracking fields are properly set."""
++        self._create_invoice_and_confirm(self.partner, 600.0)
++        order = self._create_sale_order(qty=5, price=100.0)
++        order.action_confirm()
++
++        order.with_user(self.credit_manager_user).action_release_credit()
++
++        self.assertIsNotNone(order.credit_hold_released_date)
++        self.assertEqual(order.credit_hold_released_by, self.credit_manager_user)
++        self.assertFalse(order.credit_hold)
+diff --git a/sale_credit_hold/views/res_partner_views.xml b/sale_credit_hold/views/res_partner_views.xml
+new file mode 100644
+index 0000000..7fbd2c7
+--- /dev/null
++++ b/sale_credit_hold/views/res_partner_views.xml
+@@ -0,0 +1,13 @@
++<?xml version="1.0" encoding="utf-8" ?>
++<odoo>
++    <record id="res_partner_form_credit_hold" model="ir.ui.view">
++        <field name="name">res.partner.form.credit_hold</field>
++        <field name="model">res.partner</field>
++        <field name="inherit_id" ref="base.view_partner_form" />
++        <field name="arch" type="xml">
++            <field name="credit" position="before">
++                <field name="credit_limit" />
++            </field>
++        </field>
++    </record>
++</odoo>
+diff --git a/sale_credit_hold/views/sale_order_views.xml b/sale_credit_hold/views/sale_order_views.xml
+new file mode 100644
+index 0000000..01571ba
+--- /dev/null
++++ b/sale_credit_hold/views/sale_order_views.xml
+@@ -0,0 +1,75 @@
++<?xml version="1.0" encoding="utf-8" ?>
++<odoo>
++    <record id="sale_order_form_credit_hold" model="ir.ui.view">
++        <field name="name">sale.order.form.credit_hold</field>
++        <field name="model">sale.order</field>
++        <field name="inherit_id" ref="sale.view_order_form" />
++        <field name="arch" type="xml">
++            <field name="state" position="attributes">
++                <attribute
++                    name="statusbar_visible"
++                >draft,sent,sale,credit_hold,done,cancel</attribute>
++            </field>
++            <xpath expr="//header/button[@name='action_confirm']" position="after">
++                <button
++                    name="action_release_credit"
++                    string="Release Credit Hold"
++                    type="object"
++                    class="btn-primary"
++                    groups="sale_credit_hold.group_credit_manager"
++                    invisible="state != 'credit_hold'"
++                    confirm="Are you sure you want to release the credit hold? This will trigger procurement and delivery processes."
++                />
++            </xpath>
++            <xpath
++                expr="//page[@name='other_information']/group"
++                position="inside"
++            >
++                <group
++                    string="Credit Hold Information"
++                    name="credit_hold_info"
++                    invisible="not credit_hold"
++                >
++                    <field name="credit_hold" invisible="1" />
++                    <field
++                        name="credit_hold_released_date"
++                        invisible="not credit_hold_released_date"
++                    />
++                    <field
++                        name="credit_hold_released_by"
++                        invisible="not credit_hold_released_by"
++                    />
++                </group>
++            </xpath>
++        </field>
++    </record>
++
++    <record id="sale_order_tree_credit_hold" model="ir.ui.view">
++        <field name="name">sale.order.tree.credit_hold</field>
++        <field name="model">sale.order</field>
++        <field name="inherit_id" ref="sale.view_order_tree" />
++        <field name="arch" type="xml">
++            <field name="state" position="attributes">
++                <attribute
++                    name="decoration-danger"
++                >state == 'credit_hold'</attribute>
++            </field>
++        </field>
++    </record>
++
++    <record id="sale_order_search_credit_hold" model="ir.ui.view">
++        <field name="name">sale.order.search.credit_hold</field>
++        <field name="model">sale.order</field>
++        <field name="inherit_id" ref="sale.sale_order_view_search_inherit_sale" />
++        <field name="arch" type="xml">
++            <filter name="my_sale_orders_filter" position="after">
++                <filter
++                    string="Credit Hold"
++                    name="filter_credit_hold"
++                    domain="[('state', '=', 'credit_hold')]"
++                    help="Orders on credit hold"
++                />
++            </filter>
++        </field>
++    </record>
++</odoo>
