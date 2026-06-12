@@ -1,0 +1,44 @@
+# Translation of Odoo Server.
+# This file contains the translation of the following modules:
+# 	* sale_advanced_workflow
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: Odoo Server 16.0\n"
+"Report-Msgid-Bugs-To: \n"
+"PO-Revision-Date: 2026-06-12 00:00+0000\n"
+"Last-Translator: OpenAI\n"
+"Language-Team: Chinese\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#. module: sale_advanced_workflow
+#: model:ir.model.fields.selection,name:sale_advanced_workflow.selection__sale_order__state__pending_review
+msgid "Pending Review"
+msgstr "待审核"
+
+#. module: sale_advanced_workflow
+#: model_terms:ir.ui.view,arch_db:sale_advanced_workflow.view_order_form_inherit_pending_review
+msgid "Send to Review"
+msgstr "提交审核"
+
+#. module: sale_advanced_workflow
+#. odoo-python
+#: code:addons/sale_advanced_workflow/models/sale_order.py:0
+msgid "No invoice could be created for this sales order."
+msgstr "当前销售订单无法生成发票。"
+
+#. module: sale_advanced_workflow
+#. odoo-python
+#: code:addons/sale_advanced_workflow/models/sale_order.py:0
+msgid "Only confirmed orders can be moved to pending review."
+msgstr "仅已确认的销售订单可以转为待审核。"
+
+#. module: sale_advanced_workflow
+#. odoo-python
+#: code:addons/sale_advanced_workflow/models/sale_order.py:0
+msgid "Only orders above %(threshold).2f can be moved to pending review."
+msgstr "仅当订单金额高于 %(threshold).2f 时，才可以转为待审核。"

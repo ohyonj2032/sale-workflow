@@ -1,0 +1,233 @@
+diff --git a/sale_advanced_workflow/__init__.py b/sale_advanced_workflow/__init__.py
+new file mode 100644
+--- /dev/null
++++ b/sale_advanced_workflow/__init__.py
+@@ -0,0 +1 @@
++from . import models
+diff --git a/sale_advanced_workflow/__manifest__.py b/sale_advanced_workflow/__manifest__.py
+new file mode 100644
+--- /dev/null
++++ b/sale_advanced_workflow/__manifest__.py
+@@ -0,0 +1,13 @@
++{
++    "name": "Sale Advanced Workflow",
++    "summary": "Adds a pending review step for confirmed sales orders.",
++    "version": "16.0.1.0.0",
++    "category": "Sales",
++    "website": "https://github.com/OCA/sale-workflow",
++    "author": "OpenAI",
++    "license": "AGPL-3",
++    "application": False,
++    "installable": True,
++    "depends": ["sale", "account"],
++    "data": ["views/sale_order_views.xml"],
++}
+diff --git a/sale_advanced_workflow/i18n/zh_CN.po b/sale_advanced_workflow/i18n/zh_CN.po
+new file mode 100644
+--- /dev/null
++++ b/sale_advanced_workflow/i18n/zh_CN.po
+@@ -0,0 +1,44 @@
++# Translation of Odoo Server.
++# This file contains the translation of the following modules:
++# 	* sale_advanced_workflow
++#
++msgid ""
++msgstr ""
++"Project-Id-Version: Odoo Server 16.0\n"
++"Report-Msgid-Bugs-To: \n"
++"PO-Revision-Date: 2026-06-12 00:00+0000\n"
++"Last-Translator: OpenAI\n"
++"Language-Team: Chinese\n"
++"Language: zh_CN\n"
++"MIME-Version: 1.0\n"
++"Content-Type: text/plain; charset=UTF-8\n"
++"Content-Transfer-Encoding: 8bit\n"
++"Plural-Forms: nplurals=1; plural=0;\n"
++
++#. module: sale_advanced_workflow
++#: model:ir.model.fields.selection,name:sale_advanced_workflow.selection__sale_order__state__pending_review
++msgid "Pending Review"
++msgstr "待审核"
++
++#. module: sale_advanced_workflow
++#: model_terms:ir.ui.view,arch_db:sale_advanced_workflow.view_order_form_inherit_pending_review
++msgid "Send to Review"
++msgstr "提交审核"
++
++#. module: sale_advanced_workflow
++#. odoo-python
++#: code:addons/sale_advanced_workflow/models/sale_order.py:0
++msgid "No invoice could be created for this sales order."
++msgstr "当前销售订单无法生成发票。"
++
++#. module: sale_advanced_workflow
++#. odoo-python
++#: code:addons/sale_advanced_workflow/models/sale_order.py:0
++msgid "Only confirmed orders can be moved to pending review."
++msgstr "仅已确认的销售订单可以转为待审核。"
++
++#. module: sale_advanced_workflow
++#. odoo-python
++#: code:addons/sale_advanced_workflow/models/sale_order.py:0
++msgid "Only orders above %(threshold).2f can be moved to pending review."
++msgstr "仅当订单金额高于 %(threshold).2f 时，才可以转为待审核。"
+diff --git a/sale_advanced_workflow/models/__init__.py b/sale_advanced_workflow/models/__init__.py
+new file mode 100644
+--- /dev/null
++++ b/sale_advanced_workflow/models/__init__.py
+@@ -0,0 +1 @@
++from . import sale_order
+diff --git a/sale_advanced_workflow/models/sale_order.py b/sale_advanced_workflow/models/sale_order.py
+new file mode 100644
+--- /dev/null
++++ b/sale_advanced_workflow/models/sale_order.py
+@@ -0,0 +1,51 @@
++from odoo import _, api, fields, models
++from odoo.exceptions import UserError
++
++
++class SaleOrder(models.Model):
++    _inherit = "sale.order"
++
++    PENDING_REVIEW_THRESHOLD = 1000.0
++
++    state = fields.Selection(
++        selection_add=[("pending_review", "Pending Review")],
++        ondelete={
++            "pending_review": lambda records: records.write({"state": "sale"})
++        },
++    )
++    can_pending_review = fields.Boolean(compute="_compute_can_pending_review")
++
++    @api.depends("state", "amount_total")
++    def _compute_can_pending_review(self):
++        for order in self:
++            order.can_pending_review = (
++                order.state == "sale"
++                and order.amount_total > order._get_pending_review_threshold()
++            )
++
++    def _get_pending_review_threshold(self):
++        self.ensure_one()
++        return self.PENDING_REVIEW_THRESHOLD
++
++    def action_pending_review(self):
++        for order in self:
++            if order.state != "sale":
++                raise UserError(
++                    _("Only confirmed orders can be moved to pending review.")
++                )
++            threshold = order._get_pending_review_threshold()
++            if order.amount_total <= threshold:
++                raise UserError(
++                    _(
++                        "Only orders above %(threshold).2f can be moved to pending review."
++                    )
++                    % {"threshold": threshold}
++                )
++            invoices = order._create_invoices()
++            if not invoices:
++                raise UserError(
++                    _("No invoice could be created for this sales order.")
++                )
++            order.state = "pending_review"
++        return True
+diff --git a/sale_advanced_workflow/tests/__init__.py b/sale_advanced_workflow/tests/__init__.py
+new file mode 100644
+--- /dev/null
++++ b/sale_advanced_workflow/tests/__init__.py
+@@ -0,0 +1 @@
++from . import test_sale_advanced_workflow
+diff --git a/sale_advanced_workflow/tests/test_sale_advanced_workflow.py b/sale_advanced_workflow/tests/test_sale_advanced_workflow.py
+new file mode 100644
+--- /dev/null
++++ b/sale_advanced_workflow/tests/test_sale_advanced_workflow.py
+@@ -0,0 +1,58 @@
++from odoo import Command
++from odoo.exceptions import UserError
++from odoo.tests import tagged
++
++from odoo.addons.sale.tests.common import TestSaleCommon
++
++
++@tagged("post_install", "-at_install")
++class TestSaleAdvancedWorkflow(TestSaleCommon):
++    @classmethod
++    def setUpClass(cls):
++        super().setUpClass()
++        cls.product = cls.company_data["product_order_no"]
++        cls.product.invoice_policy = "order"
++
++    @classmethod
++    def _create_sale_order(cls, price_unit):
++        return cls.env["sale.order"].with_context(tracking_disable=True).create(
++            {
++                "partner_id": cls.partner_a.id,
++                "partner_invoice_id": cls.partner_a.id,
++                "partner_shipping_id": cls.partner_a.id,
++                "pricelist_id": cls.company_data["default_pricelist"].id,
++                "order_line": [
++                    Command.create(
++                        {
++                            "name": cls.product.name,
++                            "product_id": cls.product.id,
++                            "product_uom_qty": 1.0,
++                            "product_uom": cls.product.uom_id.id,
++                            "price_unit": price_unit,
++                            "tax_id": False,
++                        }
++                    )
++                ],
++            }
++        )
++
++    def test_action_pending_review_requires_threshold(self):
++        sale_order = self._create_sale_order(500.0)
++        sale_order.action_confirm()
++
++        with self.assertRaises(UserError):
++            sale_order.action_pending_review()
++
++        self.assertEqual(sale_order.state, "sale")
++        self.assertFalse(sale_order.invoice_ids)
++
++    def test_action_pending_review_creates_invoice_and_updates_state(self):
++        sale_order = self._create_sale_order(1500.0)
++        sale_order.action_confirm()
++
++        result = sale_order.action_pending_review()
++
++        self.assertTrue(result)
++        self.assertEqual(sale_order.state, "pending_review")
++        self.assertTrue(sale_order.invoice_ids)
++        self.assertEqual(sale_order.invoice_ids.mapped("move_type"), ["out_invoice"])
+diff --git a/sale_advanced_workflow/views/sale_order_views.xml b/sale_advanced_workflow/views/sale_order_views.xml
+new file mode 100644
+--- /dev/null
++++ b/sale_advanced_workflow/views/sale_order_views.xml
+@@ -0,0 +1,25 @@
++<?xml version="1.0" encoding="utf-8"?>
++<odoo>
++    <record id="view_order_form_inherit_pending_review" model="ir.ui.view">
++        <field name="name">sale.order.form.pending.review</field>
++        <field name="model">sale.order</field>
++        <field name="inherit_id" ref="sale.view_order_form"/>
++        <field name="arch" type="xml">
++            <xpath expr="//header" position="inside">
++                <button
++                    name="action_pending_review"
++                    type="object"
++                    string="Send to Review"
++                    class="oe_highlight"
++                    attrs="{'invisible': ['|', ('state', '!=', 'sale'), ('can_pending_review', '=', False)]}"
++                />
++            </xpath>
++            <xpath expr="//field[@name='state']" position="attributes">
++                <attribute name="statusbar_visible">draft,sent,sale,pending_review,done</attribute>
++            </xpath>
++            <xpath expr="//field[@name='state']" position="after">
++                <field name="can_pending_review" invisible="1"/>
++            </xpath>
++        </field>
++    </record>
++</odoo>

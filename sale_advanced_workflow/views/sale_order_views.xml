@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_order_form_inherit_pending_review" model="ir.ui.view">
+        <field name="name">sale.order.form.pending.review</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//header" position="inside">
+                <button
+                    name="action_pending_review"
+                    type="object"
+                    string="Send to Review"
+                    class="oe_highlight"
+                    attrs="{'invisible': ['|', ('state', '!=', 'sale'), ('can_pending_review', '=', False)]}"
+                />
+            </xpath>
+            <xpath expr="//field[@name='state']" position="attributes">
+                <attribute name="statusbar_visible">draft,sent,sale,pending_review,done</attribute>
+            </xpath>
+            <xpath expr="//field[@name='state']" position="after">
+                <field name="can_pending_review" invisible="1"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>
