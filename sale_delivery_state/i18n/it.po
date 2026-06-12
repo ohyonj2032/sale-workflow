@@ -54,6 +54,11 @@ msgid "Delivery Status"
 msgstr "Stato della consegna"
 
 #. module: sale_delivery_state
+#: model_terms:ir.ui.view,arch_db:sale_delivery_state.view_order_form_inherit_delivery_state
+msgid "Deliver"
+msgstr "Consegna"
+
+#. module: sale_delivery_state
 #: model:ir.model.fields,field_description:sale_delivery_state.field_sale_order__force_delivery_state
 msgid "Force Delivery State"
 msgstr "Forza lo stato della consegna"
@@ -66,7 +71,7 @@ msgstr "Forza la consegna ad evasa"
 #. module: sale_delivery_state
 #: model:ir.model.fields.selection,name:sale_delivery_state.selection__sale_order__delivery_status__full
 msgid "Fully Delivered"
-msgstr "Consegnata comletamente"
+msgstr "Consegnata completamente"
 
 #. module: sale_delivery_state
 #: model_terms:ir.ui.view,arch_db:sale_delivery_state.sale_delivery_state_res_config_settings_view_form

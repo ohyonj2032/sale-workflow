@@ -12,21 +12,18 @@ from odoo.tools import float_compare, float_is_zero
 class SaleOrder(models.Model):
     _inherit = "sale.order"
 
+    DELIVERY_STATE = [
+        ("pending", "Not Delivered"),
+        ("started", "Started"),
+        ("partial", "Partially Delivered"),
+        ("full", "Fully Delivered"),
+    ]
+
     delivery_status = fields.Selection(
-        # Compute method have a different name then the field because
-        # the method _compute_delivery_status already exist in odoo sale_stock
+        selection=DELIVERY_STATE,
         compute="_compute_oca_delivery_status",
         store=True,
-        # Respect the same order as in sale_stock
-        # Including the 'started' state
-        # that is not used here but we compute it
-        # if pickings are available, to be compatible.
-        selection=[
-            ("pending", "Not Delivered"),
-            ("started", "Started"),
-            ("partial", "Partially Delivered"),
-            ("full", "Fully Delivered"),
-        ],
+        tracking=True,
     )
 
     force_delivery_state = fields.Boolean(
@@ -36,16 +33,35 @@ class SaleOrder(models.Model):
         ),
     )
 
+    def _get_delivery_state_transitions(self):
+        return {
+            "pending": ["started"],
+            "started": ["partial", "pending"],
+            "partial": ["full", "pending"],
+            "full": [],
+        }
+
+    def _is_valid_delivery_transition(self, from_state, to_state):
+        transitions = self._get_delivery_state_transitions()
+        return to_state in transitions.get(from_state, [])
+
+    def action_confirm(self):
+        res = super().action_confirm()
+        for order in self:
+            if order.state == "sale":
+                order._compute_oca_delivery_status()
+        return res
+
+    def action_deliver(self):
+        for order in self:
+            if order.state not in ("sale", "done"):
+                continue
+            if order.delivery_status == "full":
+                continue
+            order._compute_oca_delivery_status()
+
     def _all_qty_delivered(self):
-        """
-        Returns True if all line have qty_delivered >= to ordered quantities
-
-        If `delivery` module is installed, ignores the lines with delivery costs
-
-        :returns: boolean
-        """
         self.ensure_one()
-        # Skip delivery costs lines
         sale_lines = self.order_line.filtered(
             lambda rec: not rec._is_delivery() and not rec.skip_sale_delivery_state
         )
@@ -61,13 +77,7 @@ class SaleOrder(models.Model):
         )
 
     def _partially_delivered(self):
-        """
-        Returns True if at least one line is delivered
-
-        :returns: boolean
-        """
         self.ensure_one()
-        # Skip delivery costs lines
         sale_lines = self.order_line.filtered(
             lambda rec: not rec._is_delivery() and not rec.skip_sale_delivery_state
         )
@@ -99,13 +109,6 @@ class SaleOrder(models.Model):
                 order.delivery_status = "pending"
 
     def _is_delivery_status_started(self):
-        # Loose dep on sale_stock. Feel free to customize this method
-        # to add your own logic or to create sale_stock glue module.
-        # NOTE: as the delivery_status is stored the update of a picking
-        # won't have any effect here. Hence, if you really want to
-        # fully support the started state, you should trigger the update
-        # of the sale order when a picking is updated.
-        # For now, we don't care that much as this state was not used before.
         has_pickings = "picking_ids" in self._fields
         return has_pickings and any(p.state == "done" for p in self.picking_ids)
 

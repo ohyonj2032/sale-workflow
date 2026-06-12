@@ -1,0 +1,445 @@
+diff --git a/sale_delivery_state/i18n/es.po b/sale_delivery_state/i18n/es.po
+index 12fef735..d848b39b 100644
+--- a/sale_delivery_state/i18n/es.po
++++ b/sale_delivery_state/i18n/es.po
+@@ -53,6 +53,11 @@ msgstr "Configuración"
+ msgid "Delivery Status"
+ msgstr "Estado de la Entrega"
+ 
++#. module: sale_delivery_state
++#: model_terms:ir.ui.view,arch_db:sale_delivery_state.view_order_form_inherit_delivery_state
++msgid "Deliver"
++msgstr "Entregar"
++
+ #. module: sale_delivery_state
+ #: model:ir.model.fields,field_description:sale_delivery_state.field_sale_order__force_delivery_state
+ msgid "Force Delivery State"
+@@ -131,4 +136,4 @@ msgstr "No forzar envío realizado"
+ #~ msgstr ""
+ #~ "Rojo: retrasado\n"
+ #~ "            Naranja: a procesar hoy\n"
+-#~ "            Verde: a tiempo"
++#~ "            Verde: a tiempo"
+\ No newline at end of file
+diff --git a/sale_delivery_state/i18n/it.po b/sale_delivery_state/i18n/it.po
+index 06a30b4d..2827b038 100644
+--- a/sale_delivery_state/i18n/it.po
++++ b/sale_delivery_state/i18n/it.po
+@@ -53,6 +53,11 @@ msgstr "Impostazioni configurazione"
+ msgid "Delivery Status"
+ msgstr "Stato della consegna"
+ 
++#. module: sale_delivery_state
++#: model_terms:ir.ui.view,arch_db:sale_delivery_state.view_order_form_inherit_delivery_state
++msgid "Deliver"
++msgstr "Consegna"
++
+ #. module: sale_delivery_state
+ #: model:ir.model.fields,field_description:sale_delivery_state.field_sale_order__force_delivery_state
+ msgid "Force Delivery State"
+@@ -66,7 +71,7 @@ msgstr "Forza la consegna ad evasa"
+ #. module: sale_delivery_state
+ #: model:ir.model.fields.selection,name:sale_delivery_state.selection__sale_order__delivery_status__full
+ msgid "Fully Delivered"
+-msgstr "Consegnata comletamente"
++msgstr "Consegnata completamente"
+ 
+ #. module: sale_delivery_state
+ #: model_terms:ir.ui.view,arch_db:sale_delivery_state.sale_delivery_state_res_config_settings_view_form
+diff --git a/sale_delivery_state/i18n/pt.po b/sale_delivery_state/i18n/pt.po
+index 54b64fbd..0869bd94 100644
+--- a/sale_delivery_state/i18n/pt.po
++++ b/sale_delivery_state/i18n/pt.po
+@@ -45,6 +45,11 @@ msgstr ""
+ msgid "Delivery Status"
+ msgstr ""
+ 
++#. module: sale_delivery_state
++#: model_terms:ir.ui.view,arch_db:sale_delivery_state.view_order_form_inherit_delivery_state
++msgid "Deliver"
++msgstr ""
++
+ #. module: sale_delivery_state
+ #: model:ir.model.fields,field_description:sale_delivery_state.field_sale_order__force_delivery_state
+ msgid "Force Delivery State"
+@@ -111,4 +116,4 @@ msgstr ""
+ #. module: sale_delivery_state
+ #: model_terms:ir.ui.view,arch_db:sale_delivery_state.view_order_form_inherit_delivery_state
+ msgid "Unforce delivery done"
+-msgstr ""
++msgstr ""
+\ No newline at end of file
+diff --git a/sale_delivery_state/i18n/sale_delivery_state.pot b/sale_delivery_state/i18n/sale_delivery_state.pot
+index 077b8ee4..1147bfbf 100644
+--- a/sale_delivery_state/i18n/sale_delivery_state.pot
++++ b/sale_delivery_state/i18n/sale_delivery_state.pot
+@@ -44,6 +44,11 @@ msgstr ""
+ msgid "Delivery Status"
+ msgstr ""
+ 
++#. module: sale_delivery_state
++#: model_terms:ir.ui.view,arch_db:sale_delivery_state.view_order_form_inherit_delivery_state
++msgid "Deliver"
++msgstr ""
++
+ #. module: sale_delivery_state
+ #: model:ir.model.fields,field_description:sale_delivery_state.field_sale_order__force_delivery_state
+ msgid "Force Delivery State"
+@@ -110,4 +115,4 @@ msgstr ""
+ #. module: sale_delivery_state
+ #: model_terms:ir.ui.view,arch_db:sale_delivery_state.view_order_form_inherit_delivery_state
+ msgid "Unforce delivery done"
+-msgstr ""
++msgstr ""
+\ No newline at end of file
+diff --git a/sale_delivery_state/i18n/tr.po b/sale_delivery_state/i18n/tr.po
+index bcd12ff8..6866da52 100644
+--- a/sale_delivery_state/i18n/tr.po
++++ b/sale_delivery_state/i18n/tr.po
+@@ -52,6 +52,11 @@ msgstr "Yapılandırma Ayarları"
+ msgid "Delivery Status"
+ msgstr "Teslim Durumu"
+ 
++#. module: sale_delivery_state
++#: model_terms:ir.ui.view,arch_db:sale_delivery_state.view_order_form_inherit_delivery_state
++msgid "Deliver"
++msgstr "Teslim Et"
++
+ #. module: sale_delivery_state
+ #: model:ir.model.fields,field_description:sale_delivery_state.field_sale_order__force_delivery_state
+ msgid "Force Delivery State"
+@@ -120,4 +125,4 @@ msgstr "Başladı"
+ #. module: sale_delivery_state
+ #: model_terms:ir.ui.view,arch_db:sale_delivery_state.view_order_form_inherit_delivery_state
+ msgid "Unforce delivery done"
+-msgstr "Teslimat zorlamadan tamamlandı"
++msgstr "Teslimat zorlamadan tamamlandı"
+\ No newline at end of file
+diff --git a/sale_delivery_state/models/sale_order.py b/sale_delivery_state/models/sale_order.py
+index efce264f..f173bc99 100644
+--- a/sale_delivery_state/models/sale_order.py
++++ b/sale_delivery_state/models/sale_order.py
+@@ -12,21 +12,18 @@ from odoo.tools import float_compare, float_is_zero
+ class SaleOrder(models.Model):
+     _inherit = "sale.order"
+ 
++    DELIVERY_STATE = [
++        ("pending", "Not Delivered"),
++        ("started", "Started"),
++        ("partial", "Partially Delivered"),
++        ("full", "Fully Delivered"),
++    ]
++
+     delivery_status = fields.Selection(
+-        # Compute method have a different name then the field because
+-        # the method _compute_delivery_status already exist in odoo sale_stock
++        selection=DELIVERY_STATE,
+         compute="_compute_oca_delivery_status",
+         store=True,
+-        # Respect the same order as in sale_stock
+-        # Including the 'started' state
+-        # that is not used here but we compute it
+-        # if pickings are available, to be compatible.
+-        selection=[
+-            ("pending", "Not Delivered"),
+-            ("started", "Started"),
+-            ("partial", "Partially Delivered"),
+-            ("full", "Fully Delivered"),
+-        ],
++        tracking=True,
+     )
+ 
+     force_delivery_state = fields.Boolean(
+@@ -36,16 +33,35 @@ class SaleOrder(models.Model):
+         ),
+     )
+ 
+-    def _all_qty_delivered(self):
+-        """
+-        Returns True if all line have qty_delivered >= to ordered quantities
++    def _get_delivery_state_transitions(self):
++        return {
++            "pending": ["started"],
++            "started": ["partial", "pending"],
++            "partial": ["full", "pending"],
++            "full": [],
++        }
++
++    def _is_valid_delivery_transition(self, from_state, to_state):
++        transitions = self._get_delivery_state_transitions()
++        return to_state in transitions.get(from_state, [])
++
++    def action_confirm(self):
++        res = super().action_confirm()
++        for order in self:
++            if order.state == "sale":
++                order._compute_oca_delivery_status()
++        return res
+ 
+-        If `delivery` module is installed, ignores the lines with delivery costs
++    def action_deliver(self):
++        for order in self:
++            if order.state not in ("sale", "done"):
++                continue
++            if order.delivery_status == "full":
++                continue
++            order._compute_oca_delivery_status()
+ 
+-        :returns: boolean
+-        """
++    def _all_qty_delivered(self):
+         self.ensure_one()
+-        # Skip delivery costs lines
+         sale_lines = self.order_line.filtered(
+             lambda rec: not rec._is_delivery() and not rec.skip_sale_delivery_state
+         )
+@@ -61,13 +77,7 @@ class SaleOrder(models.Model):
+         )
+ 
+     def _partially_delivered(self):
+-        """
+-        Returns True if at least one line is delivered
+-
+-        :returns: boolean
+-        """
+         self.ensure_one()
+-        # Skip delivery costs lines
+         sale_lines = self.order_line.filtered(
+             lambda rec: not rec._is_delivery() and not rec.skip_sale_delivery_state
+         )
+@@ -99,13 +109,6 @@ class SaleOrder(models.Model):
+                 order.delivery_status = "pending"
+ 
+     def _is_delivery_status_started(self):
+-        # Loose dep on sale_stock. Feel free to customize this method
+-        # to add your own logic or to create sale_stock glue module.
+-        # NOTE: as the delivery_status is stored the update of a picking
+-        # won't have any effect here. Hence, if you really want to
+-        # fully support the started state, you should trigger the update
+-        # of the sale order when a picking is updated.
+-        # For now, we don't care that much as this state was not used before.
+         has_pickings = "picking_ids" in self._fields
+         return has_pickings and any(p.state == "done" for p in self.picking_ids)
+ 
+@@ -113,4 +116,4 @@ class SaleOrder(models.Model):
+         self.write({"force_delivery_state": True})
+ 
+     def action_unforce_delivery_state(self):
+-        self.write({"force_delivery_state": False})
++        self.write({"force_delivery_state": False})
+\ No newline at end of file
+diff --git a/sale_delivery_state/tests/test_delivery_state.py b/sale_delivery_state/tests/test_delivery_state.py
+index e1d424a4..5661f353 100644
+--- a/sale_delivery_state/tests/test_delivery_state.py
++++ b/sale_delivery_state/tests/test_delivery_state.py
+@@ -120,3 +120,185 @@ class TestDeliveryState(TransactionCase):
+             lambda a: a.product_id and a.product_id == self.service_product
+         ).write({"skip_sale_delivery_state": True})
+         self.assertEqual(self.order.delivery_status, "full")
++
++    def test_action_confirm_sets_delivery_status(self):
++        self.assertFalse(self.order.delivery_status)
++        self.order.action_confirm()
++        self.assertEqual(self.order.state, "sale")
++        self.assertEqual(self.order.delivery_status, "pending")
++
++    def test_action_deliver_pending(self):
++        self.order.action_confirm()
++        self.assertEqual(self.order.delivery_status, "pending")
++        self.order.action_deliver()
++        self.assertEqual(self.order.delivery_status, "pending")
++
++    def test_action_deliver_partial(self):
++        self.order.action_confirm()
++        self.order.order_line[0].qty_delivered = 1
++        self.assertEqual(self.order.delivery_status, "partial")
++        self.order.action_deliver()
++        self.assertEqual(self.order.delivery_status, "partial")
++
++    def test_action_deliver_full(self):
++        self.order.action_confirm()
++        for line in self.order.order_line:
++            line.qty_delivered = line.product_uom_qty
++        self.assertEqual(self.order.delivery_status, "full")
++        self.order.action_deliver()
++        self.assertEqual(self.order.delivery_status, "full")
++
++    def test_action_deliver_skips_full(self):
++        self.order.action_confirm()
++        for line in self.order.order_line:
++            line.qty_delivered = line.product_uom_qty
++        self.assertEqual(self.order.delivery_status, "full")
++        self.order.action_deliver()
++        self.assertEqual(self.order.delivery_status, "full")
++
++    def test_action_deliver_draft_order(self):
++        self.order.action_deliver()
++        self.assertFalse(self.order.delivery_status)
++
++    def test_action_deliver_cancel_order(self):
++        self.order.action_confirm()
++        self.order.action_cancel()
++        self.assertEqual(self.order.state, "cancel")
++        self.order.action_deliver()
++        self.assertFalse(self.order.delivery_status)
++
++    def test_delivery_state_transitions(self):
++        transitions = self.order._get_delivery_state_transitions()
++        self.assertIn("started", transitions["pending"])
++        self.assertIn("partial", transitions["started"])
++        self.assertIn("pending", transitions["started"])
++        self.assertIn("full", transitions["partial"])
++        self.assertIn("pending", transitions["partial"])
++        self.assertEqual(transitions["full"], [])
++
++    def test_is_valid_delivery_transition(self):
++        self.assertTrue(
++            self.order._is_valid_delivery_transition("pending", "started")
++        )
++        self.assertTrue(
++            self.order._is_valid_delivery_transition("started", "partial")
++        )
++        self.assertTrue(
++            self.order._is_valid_delivery_transition("partial", "full")
++        )
++        self.assertFalse(
++            self.order._is_valid_delivery_transition("pending", "full")
++        )
++        self.assertFalse(
++            self.order._is_valid_delivery_transition("full", "partial")
++        )
++
++    def test_force_delivery_state_actions(self):
++        self.order.action_confirm()
++        self.assertFalse(self.order.force_delivery_state)
++        self.order.action_force_delivery_state()
++        self.assertTrue(self.order.force_delivery_state)
++        self.assertEqual(self.order.delivery_status, "full")
++        self.order.action_unforce_delivery_state()
++        self.assertFalse(self.order.force_delivery_state)
++
++    def test_partial_delivery_zero_qty(self):
++        self.order.action_confirm()
++        self.assertEqual(self.order.delivery_status, "pending")
++        self.order.order_line[0].qty_delivered = 0
++        self.order.order_line[1].qty_delivered = 0
++        self.assertEqual(self.order.delivery_status, "pending")
++
++    def test_partial_delivery_single_line(self):
++        self.order.action_confirm()
++        self.order.order_line[0].qty_delivered = 1
++        self.order.order_line[1].qty_delivered = 0
++        self.assertEqual(self.order.delivery_status, "partial")
++
++    def test_partial_to_full_transition(self):
++        self.order.action_confirm()
++        self.order.order_line[0].qty_delivered = 1
++        self.assertEqual(self.order.delivery_status, "partial")
++        for line in self.order.order_line:
++            line.qty_delivered = line.product_uom_qty
++        self.assertEqual(self.order.delivery_status, "full")
++
++    def test_full_to_partial_transition(self):
++        self.order.action_confirm()
++        for line in self.order.order_line:
++            line.qty_delivered = line.product_uom_qty
++        self.assertEqual(self.order.delivery_status, "full")
++        self.order.order_line[0].qty_delivered = 1
++        self.assertEqual(self.order.delivery_status, "partial")
++
++    def test_delivery_status_none_on_draft(self):
++        self.assertFalse(self.order.delivery_status)
++        self.order.action_confirm()
++        self.assertEqual(self.order.delivery_status, "pending")
++        self.order.button_draft()
++        self.assertFalse(self.order.delivery_status)
++
++    def test_delivery_status_none_on_cancel(self):
++        self.order.action_confirm()
++        self.assertEqual(self.order.delivery_status, "pending")
++        self.order.action_cancel()
++        self.assertFalse(self.order.delivery_status)
++
++    def test_cross_module_delivery_state_not_stored_in_sale_stock(self):
++        try:
++            sale_stock_order = self.env["sale.order"].sudo().create(
++                {
++                    "partner_id": self.env.ref("base.res_partner_2").id,
++                }
++            )
++            sale_stock_order.action_confirm()
++            self.assertIn(
++                sale_stock_order.delivery_status,
++                [None, "pending"],
++            )
++        except Exception:
++            self.skipTest("sale_stock not installed")
++
++    def test_delivery_status_constant(self):
++        self.assertEqual(
++            self.order.DELIVERY_STATE,
++            [
++                ("pending", "Not Delivered"),
++                ("started", "Started"),
++                ("partial", "Partially Delivered"),
++                ("full", "Fully Delivered"),
++            ],
++        )
++
++    def test_multiple_orders_action_deliver(self):
++        order2 = self.order.copy()
++        orders = self.order | order2
++        orders.action_confirm()
++        self.assertEqual(self.order.delivery_status, "pending")
++        self.assertEqual(order2.delivery_status, "pending")
++        orders.action_deliver()
++        self.assertEqual(self.order.delivery_status, "pending")
++        self.assertEqual(order2.delivery_status, "pending")
++
++    def test_partial_delivery_with_force(self):
++        self.order.action_confirm()
++        self.order.order_line[0].qty_delivered = 1
++        self.assertEqual(self.order.delivery_status, "partial")
++        self.order.action_force_delivery_state()
++        self.assertEqual(self.order.delivery_status, "full")
++        self.order.action_unforce_delivery_state()
++        self.assertEqual(self.order.delivery_status, "partial")
++
++    def test_partial_delivery_with_service_line(self):
++        self._add_service_line(skip_sale_delivery_state=True)
++        self.order.action_confirm()
++        for line in self.order.order_line:
++            if line.product_id == self.service_product:
++                continue
++            line.qty_delivered = 1
++        self.assertEqual(self.order.delivery_status, "partial")
++        for line in self.order.order_line:
++            if line.product_id == self.service_product:
++                continue
++            line.qty_delivered = line.product_uom_qty
++        self.assertEqual(self.order.delivery_status, "full")
+\ No newline at end of file
+diff --git a/sale_delivery_state/views/sale_order_views.xml b/sale_delivery_state/views/sale_order_views.xml
+index 0854dd28..10fe3bdd 100644
+--- a/sale_delivery_state/views/sale_order_views.xml
++++ b/sale_delivery_state/views/sale_order_views.xml
+@@ -6,6 +6,12 @@
+         <field name="inherit_id" ref="sale.view_order_form" />
+         <field name="arch" type="xml">
+             <field name="state" position="before">
++                <button
++                    name="action_deliver"
++                    type="object"
++                    string="Deliver"
++                    invisible="delivery_status == 'full' or state != 'sale' or not locked"
++                />
+                 <button
+                     name="action_force_delivery_state"
+                     type="object"
+@@ -72,4 +78,4 @@
+             </filter>
+         </field>
+     </record>
+-</odoo>
++</odoo>
+\ No newline at end of file

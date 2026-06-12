@@ -7,6 +7,12 @@
         <field name="arch" type="xml">
             <field name="state" position="before">
                 <button
+                    name="action_deliver"
+                    type="object"
+                    string="Deliver"
+                    invisible="delivery_status == 'full' or state != 'sale' or not locked"
+                />
+                <button
                     name="action_force_delivery_state"
                     type="object"
                     string="Force delivery done"

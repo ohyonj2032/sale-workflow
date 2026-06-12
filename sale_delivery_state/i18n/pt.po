@@ -46,6 +46,11 @@ msgid "Delivery Status"
 msgstr ""
 
 #. module: sale_delivery_state
+#: model_terms:ir.ui.view,arch_db:sale_delivery_state.view_order_form_inherit_delivery_state
+msgid "Deliver"
+msgstr ""
+
+#. module: sale_delivery_state
 #: model:ir.model.fields,field_description:sale_delivery_state.field_sale_order__force_delivery_state
 msgid "Force Delivery State"
 msgstr ""

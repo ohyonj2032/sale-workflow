@@ -120,3 +120,185 @@ class TestDeliveryState(TransactionCase):
             lambda a: a.product_id and a.product_id == self.service_product
         ).write({"skip_sale_delivery_state": True})
         self.assertEqual(self.order.delivery_status, "full")
+
+    def test_action_confirm_sets_delivery_status(self):
+        self.assertFalse(self.order.delivery_status)
+        self.order.action_confirm()
+        self.assertEqual(self.order.state, "sale")
+        self.assertEqual(self.order.delivery_status, "pending")
+
+    def test_action_deliver_pending(self):
+        self.order.action_confirm()
+        self.assertEqual(self.order.delivery_status, "pending")
+        self.order.action_deliver()
+        self.assertEqual(self.order.delivery_status, "pending")
+
+    def test_action_deliver_partial(self):
+        self.order.action_confirm()
+        self.order.order_line[0].qty_delivered = 1
+        self.assertEqual(self.order.delivery_status, "partial")
+        self.order.action_deliver()
+        self.assertEqual(self.order.delivery_status, "partial")
+
+    def test_action_deliver_full(self):
+        self.order.action_confirm()
+        for line in self.order.order_line:
+            line.qty_delivered = line.product_uom_qty
+        self.assertEqual(self.order.delivery_status, "full")
+        self.order.action_deliver()
+        self.assertEqual(self.order.delivery_status, "full")
+
+    def test_action_deliver_skips_full(self):
+        self.order.action_confirm()
+        for line in self.order.order_line:
+            line.qty_delivered = line.product_uom_qty
+        self.assertEqual(self.order.delivery_status, "full")
+        self.order.action_deliver()
+        self.assertEqual(self.order.delivery_status, "full")
+
+    def test_action_deliver_draft_order(self):
+        self.order.action_deliver()
+        self.assertFalse(self.order.delivery_status)
+
+    def test_action_deliver_cancel_order(self):
+        self.order.action_confirm()
+        self.order.action_cancel()
+        self.assertEqual(self.order.state, "cancel")
+        self.order.action_deliver()
+        self.assertFalse(self.order.delivery_status)
+
+    def test_delivery_state_transitions(self):
+        transitions = self.order._get_delivery_state_transitions()
+        self.assertIn("started", transitions["pending"])
+        self.assertIn("partial", transitions["started"])
+        self.assertIn("pending", transitions["started"])
+        self.assertIn("full", transitions["partial"])
+        self.assertIn("pending", transitions["partial"])
+        self.assertEqual(transitions["full"], [])
+
+    def test_is_valid_delivery_transition(self):
+        self.assertTrue(
+            self.order._is_valid_delivery_transition("pending", "started")
+        )
+        self.assertTrue(
+            self.order._is_valid_delivery_transition("started", "partial")
+        )
+        self.assertTrue(
+            self.order._is_valid_delivery_transition("partial", "full")
+        )
+        self.assertFalse(
+            self.order._is_valid_delivery_transition("pending", "full")
+        )
+        self.assertFalse(
+            self.order._is_valid_delivery_transition("full", "partial")
+        )
+
+    def test_force_delivery_state_actions(self):
+        self.order.action_confirm()
+        self.assertFalse(self.order.force_delivery_state)
+        self.order.action_force_delivery_state()
+        self.assertTrue(self.order.force_delivery_state)
+        self.assertEqual(self.order.delivery_status, "full")
+        self.order.action_unforce_delivery_state()
+        self.assertFalse(self.order.force_delivery_state)
+
+    def test_partial_delivery_zero_qty(self):
+        self.order.action_confirm()
+        self.assertEqual(self.order.delivery_status, "pending")
+        self.order.order_line[0].qty_delivered = 0
+        self.order.order_line[1].qty_delivered = 0
+        self.assertEqual(self.order.delivery_status, "pending")
+
+    def test_partial_delivery_single_line(self):
+        self.order.action_confirm()
+        self.order.order_line[0].qty_delivered = 1
+        self.order.order_line[1].qty_delivered = 0
+        self.assertEqual(self.order.delivery_status, "partial")
+
+    def test_partial_to_full_transition(self):
+        self.order.action_confirm()
+        self.order.order_line[0].qty_delivered = 1
+        self.assertEqual(self.order.delivery_status, "partial")
+        for line in self.order.order_line:
+            line.qty_delivered = line.product_uom_qty
+        self.assertEqual(self.order.delivery_status, "full")
+
+    def test_full_to_partial_transition(self):
+        self.order.action_confirm()
+        for line in self.order.order_line:
+            line.qty_delivered = line.product_uom_qty
+        self.assertEqual(self.order.delivery_status, "full")
+        self.order.order_line[0].qty_delivered = 1
+        self.assertEqual(self.order.delivery_status, "partial")
+
+    def test_delivery_status_none_on_draft(self):
+        self.assertFalse(self.order.delivery_status)
+        self.order.action_confirm()
+        self.assertEqual(self.order.delivery_status, "pending")
+        self.order.button_draft()
+        self.assertFalse(self.order.delivery_status)
+
+    def test_delivery_status_none_on_cancel(self):
+        self.order.action_confirm()
+        self.assertEqual(self.order.delivery_status, "pending")
+        self.order.action_cancel()
+        self.assertFalse(self.order.delivery_status)
+
+    def test_cross_module_delivery_state_not_stored_in_sale_stock(self):
+        try:
+            sale_stock_order = self.env["sale.order"].sudo().create(
+                {
+                    "partner_id": self.env.ref("base.res_partner_2").id,
+                }
+            )
+            sale_stock_order.action_confirm()
+            self.assertIn(
+                sale_stock_order.delivery_status,
+                [None, "pending"],
+            )
+        except Exception:
+            self.skipTest("sale_stock not installed")
+
+    def test_delivery_status_constant(self):
+        self.assertEqual(
+            self.order.DELIVERY_STATE,
+            [
+                ("pending", "Not Delivered"),
+                ("started", "Started"),
+                ("partial", "Partially Delivered"),
+                ("full", "Fully Delivered"),
+            ],
+        )
+
+    def test_multiple_orders_action_deliver(self):
+        order2 = self.order.copy()
+        orders = self.order | order2
+        orders.action_confirm()
+        self.assertEqual(self.order.delivery_status, "pending")
+        self.assertEqual(order2.delivery_status, "pending")
+        orders.action_deliver()
+        self.assertEqual(self.order.delivery_status, "pending")
+        self.assertEqual(order2.delivery_status, "pending")
+
+    def test_partial_delivery_with_force(self):
+        self.order.action_confirm()
+        self.order.order_line[0].qty_delivered = 1
+        self.assertEqual(self.order.delivery_status, "partial")
+        self.order.action_force_delivery_state()
+        self.assertEqual(self.order.delivery_status, "full")
+        self.order.action_unforce_delivery_state()
+        self.assertEqual(self.order.delivery_status, "partial")
+
+    def test_partial_delivery_with_service_line(self):
+        self._add_service_line(skip_sale_delivery_state=True)
+        self.order.action_confirm()
+        for line in self.order.order_line:
+            if line.product_id == self.service_product:
+                continue
+            line.qty_delivered = 1
+        self.assertEqual(self.order.delivery_status, "partial")
+        for line in self.order.order_line:
+            if line.product_id == self.service_product:
+                continue
+            line.qty_delivered = line.product_uom_qty
+        self.assertEqual(self.order.delivery_status, "full")
