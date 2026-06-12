@@ -1,0 +1,108 @@
+stages:
+  - test
+  - deploy
+
+variables:
+  ODOO_VERSION: "16.0"
+  DB_NAME: "odoo_test"
+  LOCK_TIMEOUT_THRESHOLD: 5
+
+.test_template: &test_template
+  image: python:3.10-slim
+  stage: test
+  services:
+    - name: postgres:14
+      alias: postgres
+  variables:
+    POSTGRES_DB: $DB_NAME
+    POSTGRES_USER: odoo
+    POSTGRES_PASSWORD: odoo
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends
+        build-essential libpq-dev libxml2-dev libxslt1-dev libldap2-dev
+        libsasl2-dev libssl-dev
+    - pip install --no-cache-dir
+        "odoo==$ODOO_VERSION.*"
+        click-odoo-contrib
+        psycopg2-binary
+    - pip install --no-cache-dir -e ./sale_manual_delivery
+  script:
+    - |
+      python -m odoo -c /dev/null \
+        -d $DB_NAME \
+        --db_host=postgres \
+        --db_port=5432 \
+        --db_user=odoo \
+        --db_password=odoo \
+        -i sale_manual_delivery \
+        --test-enable \
+        --stop-after-init \
+        --log-level=test
+
+test_post_init_hook:
+  <<: *test_template
+  script:
+    - |
+      echo "=== Running post_init_hook tests ==="
+      python -m odoo -c /dev/null \
+        -d $DB_NAME \
+        --db_host=postgres \
+        --db_port=5432 \
+        --db_user=odoo \
+        --db_password=odoo \
+        -i sale_manual_delivery \
+        --test-enable \
+        --test-tags=/sale_manual_delivery:TestPostInitHook \
+        --stop-after-init \
+        --log-level=test
+
+deploy_incremental:
+  image: python:3.10-slim
+  stage: deploy
+  needs:
+    - test_post_init_hook
+  services:
+    - name: postgres:14
+      alias: postgres
+  variables:
+    POSTGRES_DB: $DB_NAME
+    POSTGRES_USER: odoo
+    POSTGRES_PASSWORD: odoo
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends
+        build-essential libpq-dev
+    - pip install --no-cache-dir
+        "odoo==$ODOO_VERSION.*"
+        click-odoo-contrib
+        psycopg2-binary
+  script:
+    - |
+      set -euo pipefail
+
+      echo "=== Incremental deploy with click-odoo-update ==="
+
+      LOCK_TIMEOUT_FILE="/tmp/lock_timeout_monitor.log"
+
+      click-odoo-update \
+        --db-host=postgres \
+        --db-port=5432 \
+        --db-user=odoo \
+        --db-password=odoo \
+        --db-name=$DB_NAME \
+        --addons-path=/app/sale-workflow \
+        2>&1 | tee "$LOCK_TIMEOUT_FILE"
+
+      if grep -qiE "lock.timeout|exceeded|CRITICAL|aborted" "$LOCK_TIMEOUT_FILE"; then
+        echo "::error::Lock timeout detected during migration!"
+        echo "The post_init_hook lock wait exceeded ${LOCK_TIMEOUT_THRESHOLD}s threshold."
+        cat "$LOCK_TIMEOUT_FILE"
+        exit 1
+      fi
+
+      echo "=== Deploy completed successfully ==="
+  after_script:
+    - |
+      if [ -f /tmp/lock_timeout_monitor.log ]; then
+        echo "=== Lock timeout monitor log ==="
+        cat /tmp/lock_timeout_monitor.log || true
+      fi
