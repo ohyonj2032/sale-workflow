@@ -1,0 +1,267 @@
+diff --git a/sale_advanced_workflow/__init__.py b/sale_advanced_workflow/__init__.py
+new file mode 100644
+index 0000000..6e4f8a2
+--- /dev/null
++++ b/sale_advanced_workflow/__init__.py
+@@ -0,0 +1,2 @@
++# License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
++from . import models
+diff --git a/sale_advanced_workflow/__manifest__.py b/sale_advanced_workflow/__manifest__.py
+new file mode 100644
+index 0000000..cf7d2b1
+--- /dev/null
++++ b/sale_advanced_workflow/__manifest__.py
+@@ -0,0 +1,16 @@
++# Copyright 2025 Odoo Community Association (OCA)
++# License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl.html).
++{
++    "name": "Sale Advanced Workflow",
++    "summary": "Add pending review state to sale orders with amount threshold validation",
++    "version": "16.0.1.0.0",
++    "category": "Sales/Sales",
++    "author": "Odoo Community Association (OCA)",
++    "website": "https://github.com/OCA/sale-workflow",
++    "depends": ["sale", "account"],
++    "license": "AGPL-3",
++    "data": [
++        "views/sale_order_views.xml",
++    ],
++    "installable": True,
++}
+diff --git a/sale_advanced_workflow/i18n/zh_CN.po b/sale_advanced_workflow/i18n/zh_CN.po
+new file mode 100644
+index 0000000..e9aba3e
+--- /dev/null
++++ b/sale_advanced_workflow/i18n/zh_CN.po
+@@ -0,0 +1,42 @@
++# Translation of Odoo Server.
++# This file contains the translation of the following modules:
++# * sale_advanced_workflow
++#
++msgid ""
++msgstr ""
++"Project-Id-Version: Odoo Server 16.0\n"
++"Report-Msgid-Bugs-To: \n"
++"POT-Creation-Date: 2025-01-01 00:00+0000\n"
++"PO-Revision-Date: 2025-01-01 00:00+0000\n"
++"Last-Translator: \n"
++"Language-Team: Chinese (China)\n"
++"Language: zh_CN\n"
++"MIME-Version: 1.0\n"
++"Content-Type: text/plain; charset=UTF-8\n"
++"Content-Transfer-Encoding: \n"
++"Plural-Forms: nplurals=1; plural=0;\n"
++
++#. module: sale_advanced_workflow
++#: model:ir.model.fields,field_description:sale_advanced_workflow.field_sale_order__state
++msgid "Pending Review"
++msgstr "待审核"
++
++#. module: sale_advanced_workflow
++#: model_terms:ir.ui.view,arch_db:sale_advanced_workflow.view_order_form
++msgid "Send to Pending Review"
++msgstr "发送待审核"
++
++#. module: sale_advanced_workflow
++#: model:ir.model.fields,field_description:sale_advanced_workflow.field_sale_order__show_pending_review_button
++msgid "Show Pending Review Button"
++msgstr "显示待审核按钮"
++
++#. module: sale_advanced_workflow
++#: code:addons/sale_advanced_workflow/models/sale_order.py:0
++#, python-format
++msgid ""
++"The order total amount (%(amount).2f) does not exceed the threshold "
++"(%(threshold).2f). Cannot send to pending review."
++msgstr ""
++"订单总金额 (%(amount).2f) 未超过阈值 (%(threshold).2f)，"
++"无法发送至待审核。"
+diff --git a/sale_advanced_workflow/models/__init__.py b/sale_advanced_workflow/models/__init__.py
+new file mode 100644
+index 0000000..74a34ef
+--- /dev/null
++++ b/sale_advanced_workflow/models/__init__.py
+@@ -0,0 +1,2 @@
++# License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
++from . import sale_order
+diff --git a/sale_advanced_workflow/models/sale_order.py b/sale_advanced_workflow/models/sale_order.py
+new file mode 100644
+index 0000000..b9e9c8d
+--- /dev/null
++++ b/sale_advanced_workflow/models/sale_order.py
+@@ -0,0 +1,49 @@
++# Copyright 2025 Odoo Community Association (OCA)
++# License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl.html).
++
++from odoo import _, api, fields, models
++from odoo.exceptions import UserError
++
++
++class SaleOrder(models.Model):
++    _inherit = "sale.order"
++
++    state = fields.Selection(
++        selection_add=[("pending_review", "Pending Review")],
++        ondelete={"pending_review": "set default"},
++    )
++
++    show_pending_review_button = fields.Boolean(
++        compute="_compute_show_pending_review_button",
++        compute_sudo=True,
++    )
++
++    def _get_pending_review_threshold(self):
++        ICP = self.env["ir.config_parameter"].sudo()
++        return float(
++            ICP.get_param("sale_advanced_workflow.pending_review_threshold", "0.0")
++        )
++
++    @api.depends("state", "amount_total")
++    def _compute_show_pending_review_button(self):
++        threshold = self._get_pending_review_threshold()
++        for order in self:
++            order.show_pending_review_button = (
++                order.state == "sale" and order.amount_total > threshold
++            )
++
++    def action_pending_review(self):
++        self.ensure_one()
++        threshold = self._get_pending_review_threshold()
++        if self.amount_total <= threshold:
++            raise UserError(
++                _(
++                    "The order total amount (%(amount).2f) does not exceed "
++                    "the threshold (%(threshold).2f). "
++                    "Cannot send to pending review.",
++                    amount=self.amount_total,
++                    threshold=threshold,
++                )
++            )
++        self._create_invoices()
++        self.write({"state": "pending_review"})
+diff --git a/sale_advanced_workflow/pyproject.toml b/sale_advanced_workflow/pyproject.toml
+new file mode 100644
+index 0000000..82d4bc0
+--- /dev/null
++++ b/sale_advanced_workflow/pyproject.toml
+@@ -0,0 +1,3 @@
++[build-system]
++requires = ["whool"]
++build-backend = "whool.buildapi"
+diff --git a/sale_advanced_workflow/tests/__init__.py b/sale_advanced_workflow/tests/__init__.py
+new file mode 100644
+index 0000000..4996d21
+--- /dev/null
++++ b/sale_advanced_workflow/tests/__init__.py
+@@ -0,0 +1,2 @@
++# License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
++from . import test_sale_advanced_workflow
+diff --git a/sale_advanced_workflow/tests/test_sale_advanced_workflow.py b/sale_advanced_workflow/tests/test_sale_advanced_workflow.py
+new file mode 100644
+index 0000000..4ee6472
+--- /dev/null
++++ b/sale_advanced_workflow/tests/test_sale_advanced_workflow.py
+@@ -0,0 +1,78 @@
++# Copyright 2025 Odoo Community Association (OCA)
++# License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl.html).
++
++from odoo import Command
++from odoo.exceptions import UserError
++from odoo.tests import TransactionCase
++
++
++class TestSaleAdvancedWorkflow(TransactionCase):
++    @classmethod
++    def setUpClass(cls):
++        super().setUpClass()
++        cls.env = cls.env(context=dict(cls.env.context, tracking_disable=True))
++        cls.partner = cls.env.ref("base.res_partner_1")
++        cls.product = cls.env.ref("product.product_product_6")
++        cls.pricelist = cls.env.ref("product.list0", False)
++        if not cls.pricelist:
++            cls.pricelist = cls.env["product.pricelist"].create(
++                {"name": "Public Pricelist"}
++            )
++
++    def _create_sale_order(self, product_qty=2, price_unit=100.0):
++        return self.env["sale.order"].create(
++            {
++                "partner_id": self.partner.id,
++                "order_line": [
++                    Command.create(
++                        {
++                            "name": self.product.name,
++                            "product_id": self.product.id,
++                            "product_uom_qty": product_qty,
++                            "product_uom": self.product.uom_id.id,
++                            "price_unit": price_unit,
++                        }
++                    )
++                ],
++                "pricelist_id": self.pricelist.id,
++            }
++        )
++
++    def _set_threshold(self, value):
++        self.env["ir.config_parameter"].sudo().set_param(
++            "sale_advanced_workflow.pending_review_threshold", str(value)
++        )
++
++    def test_action_pending_review_above_threshold(self):
++        self._set_threshold(100.0)
++        order = self._create_sale_order(product_qty=2, price_unit=100.0)
++        order.action_confirm()
++        self.assertEqual(order.state, "sale")
++        order.action_pending_review()
++        self.assertEqual(order.state, "pending_review")
++
++    def test_action_pending_review_below_threshold_raises(self):
++        self._set_threshold(500.0)
++        order = self._create_sale_order(product_qty=2, price_unit=100.0)
++        order.action_confirm()
++        self.assertEqual(order.state, "sale")
++        with self.assertRaises(UserError):
++            order.action_pending_review()
++        self.assertEqual(order.state, "sale")
++
++    def test_action_pending_review_in_draft_raises(self):
++        self._set_threshold(0.0)
++        order = self._create_sale_order(product_qty=2, price_unit=100.0)
++        self.assertEqual(order.state, "draft")
++        with self.assertRaises(UserError):
++            order.action_pending_review()
++
++    def test_action_pending_review_creates_invoice(self):
++        self._set_threshold(0.0)
++        order = self._create_sale_order(product_qty=2, price_unit=100.0)
++        order.action_confirm()
++        self.assertEqual(order.state, "sale")
++        order.action_pending_review()
++        self.assertEqual(order.state, "pending_review")
++        self.assertTrue(order.invoice_ids)
++        self.assertEqual(order.invoice_ids.move_type, "out_invoice")
+diff --git a/sale_advanced_workflow/views/sale_order_views.xml b/sale_advanced_workflow/views/sale_order_views.xml
+new file mode 100644
+index 0000000..e2a8f3b
+--- /dev/null
++++ b/sale_advanced_workflow/views/sale_order_views.xml
+@@ -0,0 +1,19 @@
++<?xml version="1.0" encoding="utf-8" ?>
++<odoo>
++    <record id="view_order_form" model="ir.ui.view">
++        <field name="name">sale_advanced_workflow.view_order_form</field>
++        <field name="model">sale.order</field>
++        <field name="inherit_id" ref="sale.view_order_form" />
++        <field name="arch" type="xml">
++            <header position="inside">
++                <button
++                    name="action_pending_review"
++                    type="object"
++                    string="Send to Pending Review"
++                    class="btn-primary"
++                    invisible="not show_pending_review_button"
++                />
++            </header>
++        </field>
++    </record>
++</odoo>

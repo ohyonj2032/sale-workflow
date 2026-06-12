@@ -1,0 +1,42 @@
+# Translation of Odoo Server.
+# This file contains the translation of the following modules:
+# * sale_advanced_workflow
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: Odoo Server 16.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-01-01 00:00+0000\n"
+"PO-Revision-Date: 2025-01-01 00:00+0000\n"
+"Last-Translator: \n"
+"Language-Team: Chinese (China)\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: \n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#. module: sale_advanced_workflow
+#: model:ir.model.fields,field_description:sale_advanced_workflow.field_sale_order__state
+msgid "Pending Review"
+msgstr "待审核"
+
+#. module: sale_advanced_workflow
+#: model_terms:ir.ui.view,arch_db:sale_advanced_workflow.view_order_form
+msgid "Send to Pending Review"
+msgstr "发送待审核"
+
+#. module: sale_advanced_workflow
+#: model:ir.model.fields,field_description:sale_advanced_workflow.field_sale_order__show_pending_review_button
+msgid "Show Pending Review Button"
+msgstr "显示待审核按钮"
+
+#. module: sale_advanced_workflow
+#: code:addons/sale_advanced_workflow/models/sale_order.py:0
+#, python-format
+msgid ""
+"The order total amount (%(amount).2f) does not exceed the threshold "
+"(%(threshold).2f). Cannot send to pending review."
+msgstr ""
+"订单总金额 (%(amount).2f) 未超过阈值 (%(threshold).2f)，"
+"无法发送至待审核。"
