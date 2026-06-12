@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_order_form_inherit_sale_advanced_workflow" model="ir.ui.view">
+        <field name="name">sale.order.form.inherit.advanced.workflow</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//sheet" position="inside">
+                <field name="is_over_threshold" invisible="1"/>
+            </xpath>
+            <xpath expr="//header/field[@name='state']" position="before">
+                <button name="action_pending_review"
+                        string="Request Review"
+                        type="object"
+                        class="btn-primary"
+                        attrs="{'invisible': ['|', ('state', '!=', 'sale'), ('is_over_threshold', '=', False)]}"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>
