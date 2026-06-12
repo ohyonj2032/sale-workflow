@@ -1,0 +1,190 @@
+# -*- coding: utf-8 -*-
+from odoo.tests import tagged, Form, HttpCase
+from odoo.tests.common import TransactionCase
+from odoo.exceptions import AccessError
+
+@tagged('post_install', '-at_install')
+class TestSaleWorkflow(TransactionCase):
+
+    @classmethod
+    def setUpClass(cls):
+        super(TestSaleWorkflow, cls).setUpClass()
+        # Ensure we have a clean environment
+        cls.env = cls.env(context=dict(cls.env.context, tracking_disable=True))
+        
+        # Setup basic data
+        cls.partner = cls.env['res.partner'].create({
+            'name': 'Workflow Test Partner',
+            'email': 'workflow@example.com'
+        })
+        cls.product_1 = cls.env['product.product'].create({
+            'name': 'Test Product 1',
+            'type': 'product',
+            'list_price': 100.0,
+            'invoice_policy': 'delivery',
+        })
+        cls.product_2 = cls.env['product.product'].create({
+            'name': 'Test Product 2',
+            'type': 'product',
+            'list_price': 200.0,
+            'invoice_policy': 'delivery',
+        })
+        
+        # Setup Italian language for test 5
+        cls.env['res.lang']._activate_lang('it_IT')
+        
+        # We simulate the translation in the database for the 'state' field
+        cls.env['ir.translation'].create({
+            'type': 'selection',
+            'name': 'sale.order,state',
+            'lang': 'it_IT',
+            'src': 'Sales Order',
+            'value': 'Ordine di vendita',
+            'state': 'translated',
+        })
+
+    def test_01_form_and_onchange_linkage(self):
+        """ 1. Form测试与Onchange联动 """
+        sale_order_form = Form(self.env['sale.order'])
+        sale_order_form.partner_id = self.partner
+        
+        # Add first line
+        with sale_order_form.order_line.new() as line_form:
+            line_form.product_id = self.product_1
+            line_form.product_uom_qty = 2
+            # Verify onchange brought the correct unit price
+            self.assertEqual(line_form.price_unit, 100.0, "Onchange failed to set price_unit for product 1")
+            
+        # Add second line
+        with sale_order_form.order_line.new() as line_form:
+            line_form.product_id = self.product_2
+            line_form.product_uom_qty = 3
+            # Verify onchange brought the correct unit price
+            self.assertEqual(line_form.price_unit, 200.0, "Onchange failed to set price_unit for product 2")
+            
+        order = sale_order_form.save()
+        
+        # Verify underlying data matches frontend behavior
+        self.assertEqual(len(order.order_line), 2, "Order lines count mismatch")
+        self.assertEqual(order.amount_total, 800.0, "Order total calculation incorrect after Form simulation")
+
+    def test_02_cross_module_integration(self):
+        """ 2. 跨模块集成：action_deliver与stock.picking创建及验证 """
+        if 'stock.picking' not in self.env:
+            self.skipTest('sale_stock module is not installed, skipping cross-module test.')
+
+        sale_order_form = Form(self.env['sale.order'])
+        sale_order_form.partner_id = self.partner
+        with sale_order_form.order_line.new() as line_form:
+            line_form.product_id = self.product_1
+            line_form.product_uom_qty = 5
+        order = sale_order_form.save()
+        
+        # Confirm order, this should trigger picking creation in sale_stock
+        order.action_confirm()
+        self.assertEqual(order.state, 'sale', "Order should be confirmed")
+        
+        # Verify picking creation
+        self.assertTrue(order.picking_ids, "stock.picking was not created automatically")
+        picking = order.picking_ids[0]
+        self.assertIn(picking.state, ['confirmed', 'assigned'], "Picking state is incorrect")
+        
+        # Process the picking to simulate delivery
+        picking.action_assign()
+        for move in picking.move_ids:
+            move.quantity_done = 5
+        picking.button_validate()
+        
+        # Assert sale.order.line qty_delivered is automatically updated
+        self.assertEqual(order.order_line[0].qty_delivered, 5.0, "qty_delivered was not automatically updated after picking validation")
+
+    def test_04_partial_delivery_edge_state(self):
+        """ 4. 部分发货的边缘状态 """
+        if 'stock.picking' not in self.env:
+            self.skipTest('sale_stock module is not installed, skipping partial delivery test.')
+
+        sale_order_form = Form(self.env['sale.order'])
+        sale_order_form.partner_id = self.partner
+        with sale_order_form.order_line.new() as line_form:
+            line_form.product_id = self.product_1
+            line_form.product_uom_qty = 2
+        with sale_order_form.order_line.new() as line_form:
+            line_form.product_id = self.product_2
+            line_form.product_uom_qty = 2
+        order = sale_order_form.save()
+        
+        order.action_confirm()
+        picking = order.picking_ids[0]
+        picking.action_assign()
+        
+        # Only deliver the first product line
+        for move in picking.move_ids:
+            if move.product_id == self.product_1:
+                move.quantity_done = 2
+            else:
+                move.quantity_done = 0
+                
+        # Validate picking which will trigger backorder wizard
+        res_dict = picking.button_validate()
+        self.assertTrue(isinstance(res_dict, dict), "Validation should return an action dict for backorder")
+        self.assertEqual(res_dict.get('res_model'), 'stock.backorder.confirmation', "Backorder wizard should be triggered")
+        
+        # Process backorder wizard
+        backorder_wizard = Form(self.env['stock.backorder.confirmation'].with_context(res_dict['context'])).save()
+        backorder_wizard.process()
+        
+        # Verify order overall state and exact qty_delivered (glitch/precise calculation)
+        self.assertEqual(order.state, 'sale', "Order should remain in 'sale' state after partial delivery")
+        
+        line1 = order.order_line.filtered(lambda l: l.product_id == self.product_1)
+        line2 = order.order_line.filtered(lambda l: l.product_id == self.product_2)
+        
+        self.assertEqual(line1.qty_delivered, 2.0, "qty_delivered should be exactly 2.0 for delivered line")
+        self.assertEqual(line2.qty_delivered, 0.0, "qty_delivered should be exactly 0.0 for undelivered line")
+
+    def test_05_multilanguage_context_assertion(self):
+        """ 5. 多语言上下文断言 """
+        order = self.env['sale.order'].create({
+            'partner_id': self.partner.id,
+        })
+        order.action_confirm()
+        
+        # Read the order with Italian language context
+        order_it = order.with_context(lang='it_IT')
+        
+        # Retrieve the selection translated string
+        selection_it = dict(order_it.fields_get(['state'])['state']['selection'])
+        translated_state = selection_it.get('sale')
+        
+        # Verify it reads the i18n/it.po translation ("Ordine di vendita") and not the English source
+        self.assertEqual(translated_state, 'Ordine di vendita', "State field did not read the correct translation from it_IT context")
+
+
+@tagged('post_install', '-at_install')
+class TestSaleWorkflowController(HttpCase):
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.api_user = cls.env['res.users'].create({
+            'name': 'API Test User',
+            'login': 'api_test_user',
+            'password': 'api_test_password',
+            'groups_id': [(4, cls.env.ref('base.group_user').id)]
+        })
+
+    def test_03_controller_api_authentication(self):
+        """ 3. 控制器API鉴权测试 (controllers/sale_order.py) """
+        # Test endpoint defined in controllers/sale_order.py
+        api_endpoint = '/api/sale_order'
+        
+        # Test 1: Unauthorized request (should return 403 Forbidden)
+        response_unauth = self.url_open(api_endpoint)
+        self.assertEqual(response_unauth.status_code, 403, "Unauthorized user should get 403 Forbidden")
+        
+        # Test 2: Authenticate using simulate login state (no hardcoded uid)
+        self.authenticate('api_test_user', 'api_test_password')
+        
+        # Authorized request
+        response_auth = self.url_open(api_endpoint)
+        self.assertEqual(response_auth.status_code, 200, "Authorized user should get 200 OK")
