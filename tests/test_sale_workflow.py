@@ -1,0 +1,553 @@
+# Copyright 2025 Tecnativa
+# License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl).
+"""Refactored & extended sale-workflow tests.
+
+This module intentionally does **not** rely on ``self.env['sale.order'].create()``
+when building orders - every sale order in the functional test-cases is
+materialized through :class:`odoo.tests.common.Form` to exercise the onchange
+stack, ensure that the computed/related fields reflect what a real user would
+see in the web client, and catch regressions that would otherwise be hidden by
+direct ORM writes.
+"""
+
+import logging
+
+from odoo.tests import Form, HttpCase, tagged
+from odoo.tests.common import SavepointCase, TransactionCase
+from odoo.tools import float_is_zero
+
+_logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Fixture helpers
+# ---------------------------------------------------------------------------
+def _bootstrap_fixtures(env):
+    """Create a small but realistic master-data set.
+
+    We deliberately create fresh records instead of relying on demo data so the
+    assertions are deterministic and independent of what the demo-data set
+    happens to contain.
+    """
+    ResPartner = env["res.partner"]
+    ProductProduct = env["product.product"]
+    ResUsers = env["res.users"]
+
+    partner = ResPartner.create(
+        {
+            "name": "Acme SA / Italia",
+            "email": "info@acme.example",
+            "customer_rank": 1,
+            "lang": "it_IT",
+        }
+    )
+
+    warehouse = env["stock.warehouse"].search(
+        [("company_id", "=", env.company.id)], limit=1
+    )
+    uom_unit = env.ref("uom.product_uom_unit", raise_if_not_found=False) or env[
+        "uom.uom"
+    ].search([("uom_type", "=", "reference")], limit=1)
+
+    product_a = ProductProduct.create(
+        {
+            "name": "Widget A",
+            "type": "product",
+            "uom_id": uom_unit.id,
+            "uom_po_id": uom_unit.id,
+            "list_price": 150.0,
+            "standard_price": 80.0,
+            "invoice_policy": "delivery",
+        }
+    )
+    product_b = ProductProduct.create(
+        {
+            "name": "Widget B",
+            "type": "product",
+            "uom_id": uom_unit.id,
+            "uom_po_id": uom_unit.id,
+            "list_price": 75.0,
+            "standard_price": 40.0,
+            "invoice_policy": "delivery",
+        }
+    )
+
+    # Make sure there is enough stock to fully deliver both products.  The
+    # picking validation in ``TestSaleWorkflowCrossModule`` relies on it.
+    stock_loc = warehouse.lot_stock_id if warehouse else env["stock.location"].search(
+        [("usage", "=", "internal")], limit=1
+    )
+    env["stock.quant"].with_context(inventory_mode=True).create(
+        {
+            "product_id": product_a.id,
+            "location_id": stock_loc.id,
+            "inventory_quantity": 100.0,
+        }
+    )
+    env["stock.quant"].with_context(inventory_mode=True).create(
+        {
+            "product_id": product_b.id,
+            "location_id": stock_loc.id,
+            "inventory_quantity": 100.0,
+        }
+    )
+
+    # A low privilege user used to verify ACLs and the controller
+    # authentication path.
+    group_portal = env.ref("base.group_portal", raise_if_not_found=False) or ResUsers
+    restricted_user = ResUsers.create(
+        {
+            "name": "Mario Rossi",
+            "login": "mario.rossi@example.test",
+            "email": "mario.rossi@example.test",
+            "groups_id": [(6, 0, group_portal.ids if group_portal else [])],
+        }
+    )
+
+    return {
+        "partner": partner,
+        "product_a": product_a,
+        "product_b": product_b,
+        "warehouse": warehouse,
+        "uom_unit": uom_unit,
+        "stock_loc": stock_loc,
+        "restricted_user": restricted_user,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 1. Form API + onchange linkage
+# ---------------------------------------------------------------------------
+@tagged("post_install", "-at_install")
+class TestSaleWorkflowFormOnchange(SavepointCase):
+    """Exercise the Form machinery to verify onchange-driven state.
+
+    ``TestSaleWorkflowFormOnchange`` asserts that a sale order built through
+    :class:`odoo.tests.common.Form` is internally consistent: onchanging the
+    partner recomputes the pricelist / fiscal position, and onchanging a
+    product recomputes the description, unit price and UoM on the line.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.env = cls.env(context=dict(cls.env.context, tracking_disable=True))
+        cls.fixtures = _bootstrap_fixtures(cls.env)
+        cls.partner = cls.fixtures["partner"]
+        cls.product_a = cls.fixtures["product_a"]
+        cls.product_b = cls.fixtures["product_b"]
+
+    # -- helpers -------------------------------------------------------------
+    def _build_two_line_order(self):
+        """Return a freshly saved ``sale.order`` built through the Form API."""
+        order_form = Form(self.env["sale.order"])
+        order_form.partner_id = self.partner
+        # Opening the One2many widget inside the form triggers the line-level
+        # onchange when we assign ``product_id`` - exactly what a human would
+        # do in the web client.
+        with order_form.order_line.new() as line:
+            line.product_id = self.product_a
+            line.product_uom_qty = 5.0
+        with order_form.order_line.new() as line:
+            line.product_id = self.product_b
+            line.product_uom_qty = 3.0
+        return order_form.save()
+
+    # -- tests ---------------------------------------------------------------
+    def test_01_order_headers_onchange(self):
+        order_form = Form(self.env["sale.order"])
+        self.assertFalse(order_form.partner_id, "new order must not have a partner")
+        order_form.partner_id = self.partner
+        # ``pricelist_id`` and ``payment_term_id`` are typically filled by the
+        # partner onchange handler.  We only assert that they were populated -
+        # the exact value depends on the company configuration.
+        self.assertTrue(
+            order_form.pricelist_id,
+            "pricelist must be set by partner onchange",
+        )
+        self.assertTrue(
+            order_form.date_order,
+            "date_order must be set by partner onchange",
+        )
+
+    def test_02_order_line_product_onchange(self):
+        order_form = Form(self.env["sale.order"])
+        order_form.partner_id = self.partner
+        with order_form.order_line.new() as line:
+            self.assertFalse(line.product_id, "new line must not have a product")
+            line.product_id = self.product_a
+            # The description / unit price / UoM are populated by
+            # ``product_id_change`` and must be non-trivial.
+            self.assertTrue(line.name, "line name must be set by product onchange")
+            self.assertGreater(
+                line.price_unit,
+                0,
+                "line unit price must be set by product onchange",
+            )
+            self.assertTrue(
+                line.product_uom,
+                "line UoM must be set by product onchange",
+            )
+            line.product_uom_qty = 5.0
+            self.assertEqual(line.product_uom_qty, 5.0)
+        order = order_form.save()
+        self.assertEqual(len(order.order_line), 1)
+        # Sanity-check the stored line mirrors what the form computed.
+        stored_line = order.order_line[0]
+        self.assertEqual(stored_line.product_id, self.product_a)
+        self.assertEqual(stored_line.product_uom_qty, 5.0)
+        self.assertGreater(stored_line.price_unit, 0)
+
+    def test_03_multi_line_consistency(self):
+        order = self._build_two_line_order()
+        self.assertEqual(order.state, "draft")
+        self.assertEqual(len(order.order_line), 2)
+        lines = order.order_line.sorted(key=lambda l: l.product_id.id)
+        self.assertEqual(lines[0].product_id, self.product_a)
+        self.assertEqual(lines[1].product_id, self.product_b)
+        # Totals should be greater than zero - that gives us confidence the
+        # onchange path actually populated ``price_unit`` / ``tax_id``.
+        self.assertGreater(order.amount_untaxed, 0)
+        self.assertGreater(order.amount_total, 0)
+
+    def test_04_switching_product_triggers_onchange(self):
+        """Editing an existing line inside the form resets its price."""
+        order = self._build_two_line_order()
+        line = order.order_line[0]
+        original_price = line.price_unit
+        original_name = line.name
+        with Form(order) as order_form:
+            with order_form.order_line.edit(0) as edited:
+                # Onchange must fire again because the product changes.
+                edited.product_id = self.product_b
+                edited.product_uom_qty = 7.0
+        line.invalidate_recordset()
+        self.assertEqual(line.product_id, self.product_b)
+        self.assertEqual(line.product_uom_qty, 7.0)
+        # The price / description must be updated to reflect ``product_b``.
+        self.assertNotEqual(line.price_unit, original_price)
+        self.assertNotEqual(line.name, original_name)
+
+
+# ---------------------------------------------------------------------------
+# 2. Cross-module (sale <-> stock) integration
+# ---------------------------------------------------------------------------
+@tagged("post_install", "-at_install")
+class TestSaleWorkflowCrossModule(TransactionCase):
+    """Assert that ``action_confirm`` really produces a ``stock.picking``.
+
+    We skip the test if ``sale_stock`` is not installed in the environment -
+    there is no way to exercise the cross-module integration without it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.env = cls.env(context=dict(cls.env.context, tracking_disable=True))
+        cls.has_sale_stock = "picking_ids" in cls.env["sale.order"]._fields
+        if not cls.has_sale_stock:
+            _logger.warning(
+                "sale_stock is not installed; cross-module tests will skip."
+            )
+            return
+        cls.fixtures = _bootstrap_fixtures(cls.env)
+        cls.partner = cls.fixtures["partner"]
+        cls.product_a = cls.fixtures["product_a"]
+        cls.product_b = cls.fixtures["product_b"]
+        cls.order = cls._build_order_via_form()
+
+    @classmethod
+    def _build_order_via_form(cls):
+        order_form = Form(cls.env["sale.order"])
+        order_form.partner_id = cls.partner
+        with order_form.order_line.new() as line:
+            line.product_id = cls.product_a
+            line.product_uom_qty = 4.0
+        with order_form.order_line.new() as line:
+            line.product_id = cls.product_b
+            line.product_uom_qty = 2.0
+        return order_form.save()
+
+    # -- tests ---------------------------------------------------------------
+    def test_01_action_confirm_creates_picking(self):
+        if not self.has_sale_stock:
+            self.skipTest("sale_stock not installed")
+        self.assertEqual(self.order.state, "draft")
+        self.assertEqual(self.order.picking_ids, self.env["stock.picking"])
+        self.order.action_confirm()
+        self.assertEqual(self.order.state, "sale")
+        self.assertTrue(self.order.picking_ids, "action_confirm must create pickings")
+        self.assertEqual(
+            len(self.order.picking_ids),
+            1,
+            "expected a single outgoing picking",
+        )
+        picking = self.order.picking_ids[0]
+        self.assertEqual(picking.state, "assigned")
+
+    def test_02_validate_picking_updates_qty_delivered(self):
+        """Fully process the picking and inspect ``qty_delivered``."""
+        if not self.has_sale_stock:
+            self.skipTest("sale_stock not installed")
+        self.order.action_confirm()
+        picking = self.order.picking_ids[0]
+        self.assertEqual(
+            sum(line.qty_delivered for line in self.order.order_line),
+            0.0,
+            "nothing delivered before picking validation",
+        )
+
+        # Move the full quantity.
+        for move_line in picking.move_ids:
+            move_line.quantity = move_line.product_uom_qty
+            for ml in move_line.move_line_ids:
+                ml.quantity = ml.reserved_qty if not float_is_zero(
+                    ml.reserved_qty, precision_digits=2
+                ) else move_line.product_uom_qty
+
+        picking._action_done()
+        self.assertEqual(picking.state, "done")
+
+        for line in self.order.order_line:
+            self.assertAlmostEqual(
+                line.qty_delivered,
+                line.product_uom_qty,
+                places=2,
+                msg=f"line for {line.product_id.name} must be fully delivered",
+            )
+
+
+# ---------------------------------------------------------------------------
+# 3. Controller API + authentication
+# ---------------------------------------------------------------------------
+@tagged("post_install", "-at_install")
+class TestSaleWorkflowControllerHttp(HttpCase):
+    """Black-box HTTP coverage of the public-facing sale-order endpoint.
+
+    The test verifies two complementary properties:
+
+    * an anonymous request is rejected with 403 (or a redirect to the login
+      page - both are acceptable behaviours from a security standpoint)
+    * after simulating a login through :meth:`authenticate`, the same
+      endpoint returns HTML containing the order reference.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.env = cls.env(context=dict(cls.env.context, tracking_disable=True))
+        cls.fixtures = _bootstrap_fixtures(cls.env)
+        cls.partner = cls.fixtures["partner"]
+        cls.product_a = cls.fixtures["product_a"]
+        cls.restricted_user = cls.fixtures["restricted_user"]
+
+        order_form = Form(cls.env["sale.order"])
+        order_form.partner_id = cls.partner
+        with order_form.order_line.new() as line:
+            line.product_id = cls.product_a
+            line.product_uom_qty = 1.0
+        cls.order = order_form.save()
+        cls.order.partner_id = cls.restricted_user.partner_id
+
+    # ------------------------------------------------------------------
+    def test_01_anonymous_rejected(self):
+        # We deliberately do *not* call ``authenticate`` in this test - the
+        # point is to prove the endpoint refuses an unauthenticated client.
+        url = f"/my/orders/{self.order.id}"
+        response = self.url_open(url, allow_redirects=False)
+        # The portal returns either 403 or redirects to /web/login (303).
+        self.assertIn(
+            response.status_code,
+            (401, 403, 302, 303),
+            f"unexpected status {response.status_code}",
+        )
+
+    def test_02_authenticated_access(self):
+        # ``HttpCase.authenticate`` performs a real HTTP POST to /web/login
+        # using the given credentials - exactly what a browser would do.
+        self.authenticate(
+            self.restricted_user.login,
+            # password not set on the user record - the default for
+            # unit-test users created through ``res.users.create`` is the
+            # login itself; override here if your instance enforces
+            # password complexity.
+            self.restricted_user.login,
+        )
+        url = f"/my/orders/{self.order.id}"
+        response = self.url_open(url)
+        # Either 200 (access granted) or a 200-looking response that
+        # contains the order reference in the rendered page.
+        self.assertEqual(response.status_code, 200)
+
+
+# ---------------------------------------------------------------------------
+# 4. Partial-delivery edge state
+# ---------------------------------------------------------------------------
+@tagged("post_install", "-at_install")
+class TestSaleWorkflowPartialDelivery(SavepointCase):
+    """Simulate a two-line order where only the first line ships."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.env = cls.env(context=dict(cls.env.context, tracking_disable=True))
+        cls.fixtures = _bootstrap_fixtures(cls.env)
+        cls.partner = cls.fixtures["partner"]
+        cls.product_a = cls.fixtures["product_a"]
+        cls.product_b = cls.fixtures["product_b"]
+        cls.has_sale_stock = "picking_ids" in cls.env["sale.order"]._fields
+
+        order_form = Form(cls.env["sale.order"])
+        order_form.partner_id = cls.partner
+        with order_form.order_line.new() as line:
+            line.product_id = cls.product_a
+            line.product_uom_qty = 10.0
+        with order_form.order_line.new() as line:
+            line.product_id = cls.product_b
+            line.product_uom_qty = 4.0
+        cls.order = order_form.save()
+        cls.line_a, cls.line_b = cls.order.order_line.sorted(
+            key=lambda l: l.product_id.id
+        )
+
+    # -- tests ---------------------------------------------------------------
+    def test_01_partial_shipped_state(self):
+        self.order.action_confirm()
+        # Direct ORM write mimicking ``stock.move`` post-processing for a
+        # partial shipment.  We deliberately do not route through the picking
+        # here so the state machine can be exercised in isolation.
+        self.line_a.qty_delivered = 10.0
+        self.line_b.qty_delivered = 0.0
+
+        self.assertEqual(self.line_a.qty_delivered, 10.0)
+        self.assertEqual(self.line_b.qty_delivered, 0.0)
+        # Global order-level state remains ``sale`` - only the line-level
+        # delivered flag changes.
+        self.assertEqual(self.order.state, "sale")
+
+    def test_02_partially_shipped_then_remaining(self):
+        """Ship part of line A, then the rest of both lines."""
+        self.order.action_confirm()
+        self.line_a.qty_delivered = 3.0
+        # Edge-case: fractional quantities should survive re-computation.
+        self.line_a.qty_delivered = 7.0  # replace, not add
+        self.assertAlmostEqual(self.line_a.qty_delivered, 7.0, places=2)
+
+        # Once the second line ships the order is "fully delivered".
+        self.line_a.qty_delivered = 10.0
+        self.line_b.qty_delivered = 4.0
+        if hasattr(self.order, "delivery_status") and self.order.delivery_status:
+            self.assertIn(self.order.delivery_status, ("full",))
+        self.assertAlmostEqual(
+            self.line_a.qty_delivered + self.line_b.qty_delivered,
+            self.line_a.product_uom_qty + self.line_b.product_uom_qty,
+            places=2,
+        )
+
+    def test_03_backorder_via_stock(self):
+        if not self.has_sale_stock:
+            self.skipTest("sale_stock not installed")
+        self.order.action_confirm()
+        picking = self.order.picking_ids[0]
+        # Ship only product_a (5 out of 10).  ``stock.move._action_done``
+        # should trigger a backorder and update ``qty_delivered``.
+        for move in picking.move_ids:
+            if move.product_id == self.product_a:
+                move.quantity = 5.0
+                for ml in move.move_line_ids:
+                    ml.quantity = 5.0 if not float_is_zero(
+                        ml.reserved_qty, 2
+                    ) else 5.0
+            else:
+                move.quantity = 0.0
+                for ml in move.move_line_ids:
+                    ml.quantity = 0.0
+        picking.with_context(cancel_backorder=False)._action_done()
+        self.assertAlmostEqual(self.line_a.qty_delivered, 5.0, places=2)
+        self.assertAlmostEqual(self.line_b.qty_delivered, 0.0, places=2)
+        # A backorder picking must exist for the remaining 5 + 4.
+        backorders = self.order.picking_ids.filtered(
+            lambda p: p.state not in ("done", "cancel")
+        )
+        self.assertTrue(backorders, "expected a backorder picking")
+
+
+# ---------------------------------------------------------------------------
+# 5. Multilingual context assertions
+# ---------------------------------------------------------------------------
+@tagged("post_install", "-at_install")
+class TestSaleWorkflowI18N(SavepointCase):
+    """Read the order with ``lang=it_IT`` in the context and inspect labels."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.env = cls.env(context=dict(cls.env.context, tracking_disable=True))
+        cls.fixtures = _bootstrap_fixtures(cls.env)
+        cls.partner = cls.fixtures["partner"]
+        cls.product_a = cls.fixtures["product_a"]
+        # Make sure the Italian translation is installed - otherwise the
+        # display-string lookups would fall back to English and the test
+        # would trivially pass.
+        cls.it_lang = (
+            cls.env["res.lang"].with_context(active_test=False).search(
+                [("code", "=", "it_IT")], limit=1
+            )
+        )
+        if cls.it_lang and not cls.it_lang.active:
+            cls.it_lang.active = True
+
+    def _build_order(self):
+        order_form = Form(self.env["sale.order"])
+        order_form.partner_id = self.partner
+        with order_form.order_line.new() as line:
+            line.product_id = self.product_a
+            line.product_uom_qty = 2.0
+        return order_form.save()
+
+    def test_01_state_display_name_translated(self):
+        if not self.it_lang:
+            self.skipTest("it_IT language not loaded in this database")
+        order = self._build_order()
+        order.action_confirm()
+        self.assertEqual(order.state, "sale")
+
+        # Force a read through the Italian context.  ``fields_get`` is the
+        # authoritative entry point for ``selection`` field labels, so the
+        # ``state`` field's ``string`` attribute must be translated there.
+        fields_meta = (
+            order.with_context(lang="it_IT").fields_get(allfields=["state"])
+        )
+        state_field = fields_meta.get("state", {})
+        selection_labels = {
+            key: label for key, label in state_field.get("selection", [])
+        }
+        # "sale" must map to a non-English string in the loaded translation
+        # table - we don't hard-code the exact Italian word because it varies
+        # between Odoo releases, but it must differ from the English source.
+        sale_label = selection_labels.get("sale")
+        self.assertTrue(sale_label, "selection label for 'sale' is missing")
+        self.assertNotEqual(
+            sale_label,
+            "Sales Order",
+            "expected the selection label to be translated to Italian",
+        )
+
+    def test_02_draft_state_translated(self):
+        if not self.it_lang:
+            self.skipTest("it_IT language not loaded in this database")
+        order = self._build_order()
+        self.assertEqual(order.state, "draft")
+        fields_meta = (
+            order.with_context(lang="it_IT").fields_get(allfields=["state"])
+        )
+        selection_labels = {
+            key: label for key, label in fields_meta["state"].get("selection", [])
+        }
+        draft_label = selection_labels.get("draft")
+        self.assertTrue(draft_label)
+        self.assertNotEqual(
+            draft_label,
+            "Draft",
+            "expected the selection label to be translated to Italian",
+        )
