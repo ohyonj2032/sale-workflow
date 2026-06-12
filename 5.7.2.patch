@@ -1,0 +1,343 @@
+diff --git a/.gitlab-ci.yml b/.gitlab-ci.yml
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/.gitlab-ci.yml
+@@ -0,0 +1,36 @@
++stages:
++  - deploy
++
++variables:
++  PIP_DISABLE_PIP_VERSION_CHECK: "1"
++
++incremental_sale_order_total_margin_update:
++  stage: deploy
++  image: python:3.11
++  variables:
++    PGOPTIONS: "-c lock_timeout=5s"
++  before_script:
++    - python -m pip install --upgrade pip
++    - python -m pip install click-odoo-contrib psycopg2-binary
++  script:
++    - |
++      set -euo pipefail
++      update_exit_code=0
++      click-odoo-update \
++        --addons-path "${CI_PROJECT_DIR}" \
++        --database "${ODOO_DATABASE}" \
++        --ignore-core-addons \
++        --log-level info \
++        --watcher-max-seconds 5 \
++        2>&1 | tee click-odoo-update.log || update_exit_code=$?
++      if grep -Eiq "db lock|watcher|max db lock seconds|lock timeout|canceling statement due to lock timeout" click-odoo-update.log; then
++        echo "ALERT: x_total_margin migration exceeded 5 seconds waiting on a database lock."
++        exit 1
++      fi
++      if [ "${update_exit_code}" -ne 0 ]; then
++        exit "${update_exit_code}"
++      fi
++  artifacts:
++    when: always
++    paths:
++      - click-odoo-update.log
++
+diff --git a/sale_order_total_margin/__init__.py b/sale_order_total_margin/__init__.py
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/sale_order_total_margin/__init__.py
+@@ -0,0 +1,2 @@
++from . import models
++from .hooks import post_init_hook
++
+diff --git a/sale_order_total_margin/__manifest__.py b/sale_order_total_margin/__manifest__.py
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/sale_order_total_margin/__manifest__.py
+@@ -0,0 +1,11 @@
++{
++    "name": "Sale Order Total Margin",
++    "version": "18.0.1.0.0",
++    "author": "Odoo Community Association (OCA)",
++    "website": "https://github.com/OCA/sale-workflow",
++    "license": "AGPL-3",
++    "category": "Sale",
++    "summary": "Store and backfill sale order total margin",
++    "depends": ["sale"],
++    "post_init_hook": "post_init_hook",
++    "installable": True,
++}
++
+diff --git a/sale_order_total_margin/hooks.py b/sale_order_total_margin/hooks.py
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/sale_order_total_margin/hooks.py
+@@ -0,0 +1,76 @@
++import logging
++
++_logger = logging.getLogger(__name__)
++
++BATCH_SIZE = 500
++
++
++def _x_total_margin_column_exists(cr):
++    cr.execute(
++        """
++        SELECT 1
++        FROM information_schema.columns
++        WHERE table_schema = current_schema()
++            AND table_name = 'sale_order'
++            AND column_name = 'x_total_margin'
++        """
++    )
++    return bool(cr.fetchone())
++
++
++def post_init_hook(env):
++    cr = env.cr
++    if not _x_total_margin_column_exists(cr):
++        _logger.info(
++            "Skip x_total_margin backfill because sale_order.x_total_margin is missing"
++        )
++        return
++
++    updated_rows = 0
++    while True:
++        cr.execute("SET LOCAL lock_timeout = '5s'")
++        cr.execute(
++            """
++            WITH batch AS (
++                SELECT id
++                FROM sale_order
++                WHERE x_total_margin IS NULL
++                ORDER BY id
++                LIMIT %s
++            ),
++            updated_margin AS (
++                SELECT
++                    so.id,
++                    COALESCE(
++                        SUM(
++                            CASE
++                                WHEN sol.display_type IS NULL THEN
++                                    sol.price_subtotal
++                                    - (
++                                        sol.product_uom_qty
++                                        * COALESCE(pt.standard_price, 0)
++                                    )
++                                ELSE 0
++                            END
++                        ),
++                        0
++                    ) AS updated_total
++                FROM sale_order AS so
++                JOIN batch ON batch.id = so.id
++                LEFT JOIN sale_order_line AS sol ON sol.order_id = so.id
++                LEFT JOIN product_product AS pp ON pp.id = sol.product_id
++                LEFT JOIN product_template AS pt ON pt.id = pp.product_tmpl_id
++                GROUP BY so.id
++            )
++            UPDATE sale_order AS so
++            SET x_total_margin = updated_margin.updated_total
++            FROM updated_margin
++            WHERE so.id = updated_margin.id
++            """,
++            (BATCH_SIZE,),
++        )
++        if cr.rowcount <= 0:
++            break
++        updated_rows += cr.rowcount
++
++    _logger.info("Backfilled x_total_margin for %s sale orders", updated_rows)
++
+diff --git a/sale_order_total_margin/models/__init__.py b/sale_order_total_margin/models/__init__.py
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/sale_order_total_margin/models/__init__.py
+@@ -0,0 +1 @@
++from . import sale_order
++
+diff --git a/sale_order_total_margin/models/sale_order.py b/sale_order_total_margin/models/sale_order.py
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/sale_order_total_margin/models/sale_order.py
+@@ -0,0 +1,29 @@
++from odoo import api, fields, models
++
++
++class SaleOrder(models.Model):
++    _inherit = "sale.order"
++
++    x_total_margin = fields.Monetary(
++        compute="_compute_x_total_margin",
++        currency_field="currency_id",
++        store=True,
++        readonly=True,
++        copy=False,
++    )
++
++    @api.depends(
++        "order_line.display_type",
++        "order_line.price_subtotal",
++        "order_line.product_uom_qty",
++        "order_line.product_id",
++        "order_line.product_id.standard_price",
++    )
++    def _compute_x_total_margin(self):
++        for order in self:
++            order.x_total_margin = sum(
++                line.price_subtotal
++                - (line.product_uom_qty * line.product_id.standard_price)
++                for line in order.order_line
++                if not line.display_type
++            )
++
+diff --git a/sale_order_total_margin/pyproject.toml b/sale_order_total_margin/pyproject.toml
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/sale_order_total_margin/pyproject.toml
+@@ -0,0 +1,3 @@
++[build-system]
++requires = ["whool"]
++build-backend = "whool.buildapi"
++
+diff --git a/sale_order_total_margin/tests/__init__.py b/sale_order_total_margin/tests/__init__.py
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/sale_order_total_margin/tests/__init__.py
+@@ -0,0 +1 @@
++from . import test_post_init_hook
++
+diff --git a/sale_order_total_margin/tests/test_post_init_hook.py b/sale_order_total_margin/tests/test_post_init_hook.py
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/sale_order_total_margin/tests/test_post_init_hook.py
+@@ -0,0 +1,121 @@
++from decimal import Decimal
++
++from odoo.addons.sale_order_total_margin.hooks import post_init_hook
++from odoo.tests.common import TransactionCase
++
++
++class TestPostInitHook(TransactionCase):
++    @classmethod
++    def setUpClass(cls):
++        super().setUpClass()
++        cls.partner = cls.env["res.partner"].create({"name": "Margin Hook Partner"})
++        cls.product_a = cls.env["product.product"].create(
++            {
++                "name": "Margin Hook Product A",
++                "standard_price": 40.0,
++                "list_price": 100.0,
++                "type": "consu",
++            }
++        )
++        cls.product_b = cls.env["product.product"].create(
++            {
++                "name": "Margin Hook Product B",
++                "standard_price": 10.0,
++                "list_price": 25.0,
++                "type": "consu",
++            }
++        )
++
++    def _create_order(self, order_lines):
++        return self.env["sale.order"].create(
++            {
++                "partner_id": self.partner.id,
++                "partner_invoice_id": self.partner.id,
++                "partner_shipping_id": self.partner.id,
++                "order_line": order_lines,
++            }
++        )
++
++    def _set_dirty_state(self, orders):
++        self.env.flush_all()
++        self.env.cr.execute(
++            "ALTER TABLE sale_order ADD COLUMN IF NOT EXISTS x_total_margin numeric"
++        )
++        self.env.cr.execute(
++            "UPDATE sale_order SET x_total_margin = NULL WHERE id IN %s",
++            (tuple(orders.ids),),
++        )
++        self.env.invalidate_all()
++
++    def _set_margin_value(self, order, value):
++        self.env.flush_all()
++        self.env.cr.execute(
++            "UPDATE sale_order SET x_total_margin = %s WHERE id = %s",
++            (value, order.id),
++        )
++        self.env.invalidate_all()
++
++    def _read_margin_value(self, order):
++        self.env.flush_all()
++        self.env.cr.execute(
++            "SELECT x_total_margin FROM sale_order WHERE id = %s",
++            (order.id,),
++        )
++        return self.env.cr.fetchone()[0]
++
++    def test_post_init_hook_backfills_null_margin_once(self):
++        migrated_order = self._create_order(
++            [
++                (
++                    0,
++                    0,
++                    {
++                        "name": self.product_a.name,
++                        "product_id": self.product_a.id,
++                        "product_uom_qty": 2,
++                        "product_uom": self.product_a.uom_id.id,
++                        "price_unit": 100.0,
++                    },
++                ),
++                (
++                    0,
++                    0,
++                    {
++                        "name": self.product_b.name,
++                        "product_id": self.product_b.id,
++                        "product_uom_qty": 3,
++                        "product_uom": self.product_b.uom_id.id,
++                        "price_unit": 25.0,
++                    },
++                ),
++                (0, 0, {"display_type": "line_note", "name": "Ignored note"}),
++            ]
++        )
++        preserved_order = self._create_order(
++            [
++                (
++                    0,
++                    0,
++                    {
++                        "name": self.product_b.name,
++                        "product_id": self.product_b.id,
++                        "product_uom_qty": 1,
++                        "product_uom": self.product_b.uom_id.id,
++                        "price_unit": 25.0,
++                    },
++                )
++            ]
++        )
++
++        self._set_dirty_state(migrated_order | preserved_order)
++        self._set_margin_value(preserved_order, Decimal("77.0"))
++
++        post_init_hook(self.env)
++
++        self.assertEqual(self._read_margin_value(migrated_order), Decimal("165.0"))
++        self.assertEqual(self._read_margin_value(preserved_order), Decimal("77.0"))
++
++        post_init_hook(self.env)
++
++        self.assertEqual(self._read_margin_value(migrated_order), Decimal("165.0"))
++        self.assertEqual(self._read_margin_value(preserved_order), Decimal("77.0"))

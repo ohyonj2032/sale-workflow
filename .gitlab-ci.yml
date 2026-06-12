@@ -1,0 +1,36 @@
+stages:
+  - deploy
+
+variables:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+incremental_sale_order_total_margin_update:
+  stage: deploy
+  image: python:3.11
+  variables:
+    PGOPTIONS: "-c lock_timeout=5s"
+  before_script:
+    - python -m pip install --upgrade pip
+    - python -m pip install click-odoo-contrib psycopg2-binary
+  script:
+    - |
+      set -euo pipefail
+      update_exit_code=0
+      click-odoo-update \
+        --addons-path "${CI_PROJECT_DIR}" \
+        --database "${ODOO_DATABASE}" \
+        --ignore-core-addons \
+        --log-level info \
+        --watcher-max-seconds 5 \
+        2>&1 | tee click-odoo-update.log || update_exit_code=$?
+      if grep -Eiq "db lock|watcher|max db lock seconds|lock timeout|canceling statement due to lock timeout" click-odoo-update.log; then
+        echo "ALERT: x_total_margin migration exceeded 5 seconds waiting on a database lock."
+        exit 1
+      fi
+      if [ "${update_exit_code}" -ne 0 ]; then
+        exit "${update_exit_code}"
+      fi
+  artifacts:
+    when: always
+    paths:
+      - click-odoo-update.log
